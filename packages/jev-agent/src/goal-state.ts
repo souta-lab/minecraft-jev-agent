@@ -21,7 +21,7 @@ import { makeOptionSnapshot } from './optionSpec.ts'
 import type { OptionWorldSnapshot } from './optionSpec.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
-import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
+import { goalResourceMatches, isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, Vec3Json, WorldState } from './state.ts'
 import type { System2Objective } from './system2/service.ts'
@@ -109,7 +109,7 @@ name: string): number {
   if (!isResourceClass(name)) return host.countItem(name)
   let total = 0
   for (const item of host.bot.inventory.items()) {
-    if (matchesResourceClass(item.name, name)) total += item.count
+    if (goalResourceMatches(item.name, name)) total += item.count
   }
   return total
 }

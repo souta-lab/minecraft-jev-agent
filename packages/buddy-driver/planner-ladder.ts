@@ -12,7 +12,7 @@
 
 import type { Bot } from 'mineflayer'
 import type { GoalKind, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
-import { findInventoryFuel, matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
+import { findInventoryFuel, goalResourceMatches, matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
@@ -350,14 +350,16 @@ const FOOD_RUNG_COUNT = 3
 const FOOD_RUNG_ANCHOR = 'food'
 
 /**
- * Total edible items held, using the shared `food` resource class. Raw
- * passive-animal drops count: they are edible without a furnace, which is the
- * whole point of a survival food route.
+ * Total edible items held, using the shared `food` resource class plus the
+ * desperation tier (`goalResourceMatches`): banked rotten_flesh is eaten by
+ * the desperation arm, so it counts toward "the body has food" here the same
+ * way it counts toward `collect N x food` progress. Ordinary selection still
+ * never picks flesh over real food.
  */
 function heldFoodCount(c: Counts): number {
   let total = 0
   for (const [name, count] of Object.entries(c)) {
-    if (matchesResourceClass(name, 'food')) total += count
+    if (goalResourceMatches(name, 'food')) total += count
   }
   return total
 }

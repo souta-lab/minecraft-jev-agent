@@ -19,7 +19,7 @@ import { formatNonProgressEscalated, formatNonProgressYield, formatPlanIdentity,
 import type { GoalQueue, PlannedGoal, PlanIdentity, QueuedGoal } from './goalQueue.ts'
 import { evaluateGoalSuccess } from './goalSuccess.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
-import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import { goalResourceMatches, resourceMatches } from './resourceClass.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
 import { abandonRequested, decisionIdFrom } from './jev.ts'
 import type { EventLogger, JevResult } from './jev.ts'
@@ -879,7 +879,7 @@ export function evaluateSurfaceRecovery(
   let have = 0
   if (target !== null) {
     for (const [name, count] of Object.entries(snapshot.inventory)) {
-      if (isResourceClass(target) ? matchesResourceClass(name, target) : name === target) have += count
+      if (goalResourceMatches(name, target)) have += count
     }
   }
   const resourceSatisfied = target === null || have >= required

@@ -3,7 +3,7 @@
 // The planner must not be assumed to know world-specific item ids. It asks for a
 // class ("log", "stone", ...) and the resolver maps it to the concrete items that
 // exist in the world / inventory.
-import { isFoodItem, isFuelItem, loadGameData, recipesFor } from './gameData.ts'
+import { DESPERATION_EDIBLES, isFoodItem, isFuelItem, loadGameData, recipesFor } from './gameData.ts'
 
 export type ResourceClass = 'log' | 'planks' | 'stone' | 'fuel' | 'food' | 'pickaxe'
 
@@ -103,6 +103,19 @@ export function matchesResourceClass(itemName: string | null | undefined, cls: R
 export function resourceMatches(itemName: string | null | undefined, spec: string): boolean {
   if (typeof itemName !== 'string') return false
   return isResourceClass(spec) ? matchesResourceClass(itemName, spec) : itemName === spec
+}
+
+/**
+ * Goal-accounting variant of `resourceMatches`: identical except that the
+ * `food` spec also counts `DESPERATION_EDIBLES`. `collect N x food` exists so
+ * the body holds something it can eat, and banked rotten_flesh IS eaten by the
+ * desperation arm — without this, a flesh-only world leaves the food goal and
+ * rung uncompletable while the route works. Ordinary food selection
+ * (`pickFood`) keeps the narrow class so desperation items never outrank real
+ * food.
+ */
+export function goalResourceMatches(itemName: string | null | undefined, spec: string): boolean {
+  return resourceMatches(itemName, spec) || (spec === 'food' && DESPERATION_EDIBLES.has(itemName ?? ''))
 }
 
 /** The concrete items available in the world that satisfy a class, nearest-name order. */

@@ -29,9 +29,12 @@ import {
   generateCandidates,
   generateGroundedCandidates,
 } from './src/candidates.ts'
+import { countGoalCategory } from './src/goal-state.ts'
+import { evaluateSurfaceRecovery } from './src/goal-queue-plane.ts'
 import { GoalQueue, emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { isProtectedGoal } from './src/protectedGoals.ts'
+import { goalResourceMatches, matchesResourceClass } from './src/resourceClass.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, Vec3Json, WorldState } from './src/state.ts'
 import { buildPlanOptions, computeFrontier, RUNGS, rungIndexById } from '../buddy-driver/planner.ts'
@@ -745,17 +748,49 @@ addCase('(f6) NOT hungry + stranded above band with OPEN sky + stalled: the esca
 })
 
 // ---------------------------------------------------------------------------
+// (g) Goal accounting must count the desperation tier, or `collect:food` is
+// uncompletable in exactly the flesh-only worlds the mob-drop route targets:
+// the hunt keeps the body alive but `haveCount` stays 0 forever (churn-bound).
+// ---------------------------------------------------------------------------
 
-let failures = 0
-process.stdout.write('hunger survival: proactive eating + grounded food route regression\n')
-process.stdout.write('-'.repeat(72) + '\n')
-for (const testCase of cases) {
-  const observed = testCase.run()
-  if (!observed.pass) failures += 1
-  process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
-  process.stdout.write(`      ${observed.detail}\n`)
-}
-process.stdout.write('-'.repeat(72) + '\n')
+addCase('(g1) banked desperation flesh satisfies the food rung like ordinary food', () => {
+  const food = RUNGS.find((rung) => rung.id === 'food')
+  const world = emptyWorldMemory()
+  const byFlesh = food?.satisfied({ rotten_flesh: 3 }, world) === true
+  const underCount = food?.satisfied({ rotten_flesh: 2 }, world) === true
+  const offeredWhenFlesh = buildPlanOptions({ rotten_flesh: 3 }, world, {
+    foodLevel: 0,
+    eatBelowFood: THRESHOLD,
+  }).some((entry) => entry.id === 'food')
+  return {
+    pass: food !== undefined && byFlesh && !underCount && !offeredWhenFlesh,
+    detail: `flesh3=${byFlesh} flesh2=${underCount} offeredWithFlesh=${offeredWhenFlesh}`,
+  }
+})
+
+addCase('(g2) collect:food progress counts banked flesh (goal accounting tier)', () => {
+  const host = {
+    bot: { inventory: { items: () => [{ name: 'rotten_flesh', count: 3 }, { name: 'dirt', count: 9 }] } },
+    countItem: () => 0,
+  }
+  const fleshHave = countGoalCategory(host as never, 'food')
+  const fleshAsLog = countGoalCategory(host as never, 'log')
+  return {
+    pass: fleshHave === 3 && fleshAsLog === 0 && !matchesResourceClass('rotten_flesh', 'food') && goalResourceMatches('rotten_flesh', 'food'),
+    detail: `fleshHave=${fleshHave} fleshAsLog=${fleshAsLog} narrowClass=${matchesResourceClass('rotten_flesh', 'food')} goalClass=${goalResourceMatches('rotten_flesh', 'food')}`,
+  }
+})
+
+addCase('(g3) surface-recovery resource accounting counts the desperation tier too', () => {
+  const evaluated = evaluateSurfaceRecovery(
+    { kind: 'surface', targetY: 70, dimension: 'minecraft:overworld', targetItem: 'food', requiredCount: 3 },
+    { position: { x: 0, y: 75, z: 0 }, dimension: 'minecraft:overworld', inventory: { rotten_flesh: 3 } },
+  )
+  return {
+    pass: evaluated?.have === 3 && evaluated.resourceSatisfied === true && evaluated.satisfied === true,
+    detail: `have=${evaluated?.have} resourceSatisfied=${evaluated?.resourceSatisfied} satisfied=${evaluated?.satisfied}`,
+  }
+})
 
 // ---------------------------------------------------------------------------
 // The habitat ascent's premise is OVERWORLD spawn truth (grass + sky). A hungry
@@ -772,6 +807,19 @@ addCase('(dimension) a hungry body in the Nether gets NO animal-habitat ascent',
     detail: `dimension=${state.self.dimension} candidates=[${ascent.candidates.map((c) => c.id).join(',')}]`,
   }
 })
+
+// ---------------------------------------------------------------------------
+
+let failures = 0
+process.stdout.write('hunger survival: proactive eating + grounded food route regression\n')
+process.stdout.write('-'.repeat(72) + '\n')
+for (const testCase of cases) {
+  const observed = testCase.run()
+  if (!observed.pass) failures += 1
+  process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
+  process.stdout.write(`      ${observed.detail}\n`)
+}
+process.stdout.write('-'.repeat(72) + '\n')
 
 process.stdout.write(`${cases.length - failures}/${cases.length} hunger-food cases passed\n`)
 
