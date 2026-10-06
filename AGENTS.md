@@ -259,7 +259,9 @@ Fresh code requires fresh evidence. Same-SHA restart may retain durable failure 
 
 Provenance binds major `runId`, `activeMinor`/`segmentId`, `generationSourceSha`, build hash, generation id, world/server identity, runtime PIDs, reload/restart boundary, reconnect count, and `hostBootSha` separately from generation SHA.
 
-`active-run.json`, `state.json`, observer, P-SERIES, and live generation must agree. If provenance is uncertain, evidence is UNKNOWN until identity is reconciled. **Known registry/state drift may not survive into the next minor or source reload.** Repair stale run/minor/source ownership in the same bookkeeping batch once discovered; do not let `state.json` or `active-run.json` trail multiple accepted generations and then reconstruct final proof from memory.
+`active-run.json` owns the campaign process/run registry; live process/server/resident generation truth takes precedence over its mirrors. `state.json` and P-SERIES retain historical campaign evidence, attempt outcomes and the minimal historical Mission scoreboard. They are not live truth. `STATUS.md` is a legacy archive pointer, never a current status source. The sole compact resume view is generated `runs/capability-campaign/CURRENT.json` (`bun tools/campaign-current.mjs --write`), derived from the registry, exact process identity, a bounded resident report and historical scoreboard. Never hand-edit it or use it as gameplay/SUCCESS authority; regenerate it at resume and bookkeeping boundaries. Its timestamp, freshness, UNKNOWN states and drift fields are mandatory.
+
+If provenance is uncertain, evidence is UNKNOWN until identity is reconciled. **Known registry/state drift may not survive into the next minor or source reload.** Repair stale run/minor/source ownership in the same bookkeeping batch, append the causal history, and regenerate CURRENT; do not reconstruct final proof from memory. Sealed metadata checkpoints under `runs/capability-campaign/history/<label>/` preserve exact ledger/state/legacy-STATUS bytes with a hash manifest. No destructive history pruning or ledger rotation is part of this resume view; see `docs/CAMPAIGN-METADATA.md`.
 
 A major rollover is not complete until the unattended orientation moves with it. In the same rollover bookkeeping batch, update the active `/goal` objective/orientation and the crash handoff to the new major/run/seed/current exact source and carried high-water/debt. A goal that still names an older live major is a provenance defect: live truth still wins, but repair the stale objective before relying on stop-hooks/watchdog restarts.
 
@@ -358,7 +360,9 @@ On provider outage record `MODEL_UNAVAILABLE`, preserve semantics, and immediate
 ## 14. Resume contract
 
 After restart or a long absence, reconcile before mutation:
-`AGENTS -> git HEAD/origin/status + surviving diff -> /home/s0u7a/.config/devin/mc-ai-handoff.md -> state.json -> P-SERIES -> active-run registry -> actual processes/PIDs/ports -> world/server bytes -> latest resident generation/logs -> observer`.
+`AGENTS -> git HEAD/origin/status + surviving diff -> active-run registry -> exact campaign processes/PIDs/ports + bounded live resident generation report -> generate/read CURRENT.json -> world/server saved bytes when inactive -> /home/s0u7a/.config/devin/mc-ai-handoff.md -> historical state.json/P-SERIES/archives only on demand for the owning causal lane -> observer if needed`.
+
+Use `bun tools/campaign-current.mjs --write` for the compact view; default invocation is read-only. Absent registry, dead/recycled PID, stale/unavailable report or provenance drift must remain explicit, never promote an old durable `active` field into live evidence. The crash handoff is an orientation hint; current truth still comes first. Historical ledgers are not mandatory first reads.
 
 Durable state may claim `active` while all processes are dead; process truth wins. Repair stale durable ownership before resuming evidence claims.
 
