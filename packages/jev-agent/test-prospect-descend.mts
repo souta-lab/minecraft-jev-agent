@@ -19,6 +19,7 @@
 //
 // Run: bun test-prospect-descend.mts
 import {
+  applyReachabilityGate,
   defaultCandidateOptions,
   formatProspectRefused,
   generateGroundedCandidates,
@@ -266,6 +267,64 @@ function descendSteps(candidates: readonly Candidate[]): Candidate[] {
 function mines(candidates: readonly Candidate[]): Candidate[] {
   return candidates.filter((candidate) => candidate.kind === 'MINE')
 }
+
+// A safe dig profile is not a route to a known producer when its landing
+// moves away from that producer. A previous heading cannot override new truth.
+addCase('collect routes re-ground a held heading against the sensed producer', () => {
+  const target = { x: FEET.x - 8, y: FEET.y + 3, z: FEET.z }
+  const state = world({
+    focusItem: 'raw_iron',
+    current: { kind: 'collect', targetY: null },
+    blocks: [ore(target, { hasAdjacentStandable: true, adjacentStandable: target })],
+    descent: [downStep('E', 1, 0), ...ALL_LEVEL],
+  })
+  state.signals = signals({ digDir: 'E', digMode: 'level', digDirCount: 2 })
+  const routes = descendSteps(generateGroundedCandidates(state, defaultCandidateOptions).candidates)
+  const from = distance(FEET, target)
+  const closing = routes.every((c) => distance({
+    x: Number(c.meta.stepX), y: Number(c.meta.stepY), z: Number(c.meta.stepZ),
+  }, target) + 0.1 < from)
+  return {
+    pass: routes.some((c) => c.meta.dir === 'W') && closing,
+    detail: `routes=[${routes.map((c) => c.id).join(',')}] allClosing=${closing}`,
+  }
+})
+
+function blockedDrop(target: Vec3Json): Candidate {
+  return {
+    id: 'PICKUP:e60', kind: 'PICKUP', label: 'collect the sensed raw iron drop',
+    targetName: 'raw_iron', target, targetEntityId: 60, itemName: 'raw_iron',
+    requiresTool: false, toolName: null, inReach: false,
+    hasStandableAdjacent: false, meta: { pickupRoute: 'dropped_item_entity' },
+  }
+}
+
+addCase('blocked pickup routes use the exact drop instead of a generic search heading', () => {
+  const target = { x: FEET.x - 5, y: FEET.y + 3, z: FEET.z }
+  const state = world({ focusItem: 'raw_iron', current: { kind: 'collect', targetY: null } })
+  state.signals = signals({ digDir: 'E', digMode: 'level', digDirCount: 2 })
+  const gate = applyReachabilityGate([blockedDrop(target)], state, defaultCandidateOptions)
+  const routes = gate.candidates.filter((c) => c.kind === 'DESCEND')
+  const from = distance(FEET, target)
+  const closing = routes.every((c) => distance({
+    x: Number(c.meta.stepX), y: Number(c.meta.stepY), z: Number(c.meta.stepZ),
+  }, target) + 0.1 < from)
+  return {
+    pass: routes.some((c) => c.meta.dir === 'W') && closing,
+    detail: `routes=[${routes.map((c) => c.id).join(',')}] allClosing=${closing}`,
+  }
+})
+
+addCase('an overhead drop without a closing route does not acquire unrelated excavation', () => {
+  const target = { ...FEET, y: FEET.y + 3 }
+  const state = world({ focusItem: 'raw_iron', current: { kind: 'collect', targetY: null } })
+  const gate = applyReachabilityGate([blockedDrop(target)], state, defaultCandidateOptions)
+  const digs = gate.candidates.filter((c) => c.kind === 'DESCEND')
+  return {
+    pass: gate.withheld.some((e) => e.candidate.id === 'PICKUP:e60') && digs.length === 0,
+    detail: `digs=[${digs.map((c) => c.id).join(',')}] withheld=${gate.withheld.length}`,
+  }
+})
 
 // --- (a) the measured shape ------------------------------------------------------
 

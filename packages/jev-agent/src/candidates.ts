@@ -7850,6 +7850,7 @@ function descendCandidates(
   focusItem: string | null,
   tunnelTargets: readonly BlockState[],
   descendTargetY: number | null = null,
+  routeTarget: Vec3Json | null = null,
 ): Candidate[] {
   // Tunnel targets alone ground the route: a caller with no focus item may still
   // have handed the descend machinery specific far cells to close on (the food
@@ -7857,7 +7858,7 @@ function descendCandidates(
   // with `offered=[]` - the cells landed in `tunnelTargets` and were dropped by
   // this early return, so a hungry body got `next=explore` while the tunnel
   // primitive that answers it existed).
-  if (focusItem === null && descendTargetY === null && tunnelTargets.length === 0) return []
+  if (focusItem === null && descendTargetY === null && tunnelTargets.length === 0 && routeTarget === null) return []
   const nowMs = state.timestampMs
   const standKey = cellKey(state.self.position)
   // Zero-progress route memory: a descend step whose dig provably removed nothing
@@ -7888,6 +7889,12 @@ function descendCandidates(
   if (steps.length === 0) return []
 
   const target = tunnelTargets[0] ?? nearestResource(state, focusItem)
+  // A resource route has a real terminus, unlike a search or an explicit
+  // descend-to-level predicate. Re-ground every landing against it before
+  // preserving a previous heading. A safe dig that moves away is not evidence
+  // that this resource's route is being opened. Pickup acquisition supplies its
+  // exact entity position so it cannot inherit an unrelated search bearing.
+  const terminus = routeTarget ?? (descendTargetY === null ? target?.position ?? null : null)
   // When the route target is a sensed food cell (focusItem === null on the food
   // arm), the legs must carry the same foodRoute/foodTarget tag the direct
   // MINE/MOVE food legs carry: `foodTarget` is a meaningful meta key, so the
@@ -7921,10 +7928,10 @@ function descendCandidates(
   // for resource-class goals (early-game `log`/`planks` keep the historical
   // behaviour). Withholding only; the remaining candidates keep their order.
   const focusIsSpecific = focusItem !== null && !isResourceClass(focusItem)
-  const hasGoalTarget = target !== null || tunnelTargets.length > 0
+  const hasGoalTarget = terminus !== null || target !== null || tunnelTargets.length > 0
   if (focusIsSpecific && descendTargetY === null && !goalIsUnderground && !hasGoalTarget) return []
 
-  const targetBelow = target !== null && target.position.y < feet.y
+  const targetBelow = terminus !== null ? terminus.y < feet.y : target !== null && target.position.y < feet.y
   const knownStoneBelow = knownStoneY !== null && knownStoneY < feet.y && goalIsUnderground
   // #41: an explicit descend predicate is positive evidence for a downward step
   // even when no ore is visible, and (unlike a collect goal) it does not need one.
@@ -7936,7 +7943,10 @@ function descendCandidates(
   const fixedMode = state.signals.digMode ?? null
   const fixedCount = state.signals.digDirCount ?? 0
 
-  const base = steps.filter((step) => downEvidence || step.mode !== 'down')
+  const base = steps.filter((step) =>
+    (downEvidence || step.mode !== 'down') &&
+    (terminus === null || distance(step.step, terminus) + 0.1 < distance(feet, terminus)),
+  )
   if (base.length === 0) return []
   // The level-path budget is a hard bound on continuing the SAME selected
   // direction/mode. It does not erase a different heading or mode that the world
@@ -7992,15 +8002,22 @@ function descendCandidates(
       // This describes the candidate's geometry, not a recovery strategy.
       staircase: step.mode === 'down' && (step.dx !== 0 || step.dz !== 0),
       heading,
-      ...(boundaryReason === null
-        ? {}
-        : {
-            extraMeta: {
+      extraMeta: {
+        ...(terminus === null
+          ? {}
+          : {
+              descentRouteTarget: cellText(terminus),
+              descentRouteFrom: round2Number(distance(feet, terminus)),
+              descentRouteTo: round2Number(distance(step.step, terminus)),
+            }),
+        ...(boundaryReason === null
+          ? {}
+          : {
               recoveryBoundaryReason: boundaryReason,
               recoveryAlternatives: offeredSteps.length,
               ...(terminalOutcome === null ? {} : { skillOutcome: terminalOutcome }),
-            },
-          }),
+            }),
+      },
     })
     if (built !== null) grounded.push(built.candidate)
   }
@@ -16618,9 +16635,10 @@ function capabilityAcquisitionCandidates(
         // the distance to that target is only local wandering; the live
         // underground wedge repeatedly offered such moves and Jev selected
         // them in a p13/p14/p12 loop with zero inventory progress.  STEP and
-        // DESCEND remain available as mechanical route-opening facts because
-        // they can change the topology even when their immediate landing cell
-        // is not closer in Euclidean distance.
+        // DESCEND must share that terminus; safe excavation alone does not
+        // prove that the refused target's route improves. Targeted multi-leg
+        // planners below can supply a grounded bridge when direct reduction
+        // is unavailable.
         source.push(...routeOpeningCandidates(state, options, entry.candidate.target, digRefusals))
       } else if (capability.kind === 'safe_column') {
         // A refused ascend column already names its binding facts: `no_tool`
@@ -16757,7 +16775,7 @@ function routeOpeningCandidates(
   const out: Candidate[] = [
     ...stepCutCandidates(state, options),
     ...existingDescentRouteCandidates(state, options),
-    ...descendCandidates(state, options, focus, [], null),
+    ...descendCandidates(state, options, focus, [], null, blockedTarget),
     ...openLevelStepMoves(state, options),
   ]
   const spot = pickExplore(
