@@ -363,6 +363,7 @@ Live acceptance probe through the production policy path:
 - mixed Choice + Score + Noul batch: exact candidate ids round-trip, distribution keys equal the offered labels, raw Noul `P(true)` preserved, Score legend order preserved, reported model `d1`, `usage.output_tokens = 0`, 0.30-0.51 s per batch; identical input produced identical answers across samples;
 - caller abort -> cancelled (non-retryable); 1 ms attempt timeout -> transient; invalid credential -> HTTP 401 `invalid_api_key` -> decisive `auth`, one attempt, no retry;
 - explicit `d1:free` profile answers with reported model `d1:free`.
+- The predeclared paid-to-free transition requires decisive credit/quota/entitlement exhaustion. HTTP 5xx and 408 retain their transient server/timeout classification even when their message mentions billing or credit; they never switch tiers.
 
 Level-3 calibration was measured 2026-10-05 (Gate F, `tools/jev-d1-calibrate.mts`): 48 real d1 calls over recorded p24 decision states replayed through the production adapter and current question wording. Measured facts and the resulting profile-carried thresholds:
 

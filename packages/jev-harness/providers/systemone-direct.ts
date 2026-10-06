@@ -177,7 +177,7 @@ export class DecisionUnavailableError extends Error {
   }
 }
 
-/** Credit/billing exhaustion is decisive whatever status carries it (402, 403, 429 or a 5xx). */
+/** Credit/billing evidence applies only after transient HTTP failures are excluded. */
 const CREDIT_TEXT = /credit|balance|billing|payment required|top[ -]?up|insufficient[ _](?:funds|quota)/i
 
 function scrub(text: string, key: string): string {
@@ -195,12 +195,14 @@ export function classifyDecisionError(error: unknown, key: string): unknown {
     const status = error.status
     const message = scrub(error.message, key)
     const detail = { status, cause: error }
+    // A timeout or provider outage cannot establish paid-tier exhaustion,
+    // even when the error text mentions credit or billing.
+    if (status === 408) return new DecisionUnavailableError('timeout', message, detail)
+    if (status >= 500) return new DecisionUnavailableError('server', message, detail)
     if (status === 402 || CREDIT_TEXT.test(message)) return new DecisionUnavailableError('credit', message, detail)
     if (status === 401) return new DecisionUnavailableError('auth', message, detail)
     if (status === 403) return new DecisionUnavailableError('entitlement', message, detail)
     if (status === 429) return new DecisionUnavailableError('rate_limited', message, detail)
-    if (status === 408) return new DecisionUnavailableError('timeout', message, detail)
-    if (status >= 500) return new DecisionUnavailableError('server', message, detail)
     return new DecisionUnavailableError('bad_request', message, detail)
   }
   if (error instanceof TypeSafeError) return new DecisionUnavailableError('bad_request', scrub(error.message, key), { cause: error })

@@ -246,7 +246,6 @@ for (const [name, mutate] of malformedCases) {
 const decisiveCases: Array<[string, number, unknown, string]> = [
   ['401 authentication', 401, { error: 'invalid api key' }, 'auth'],
   ['402 payment required', 402, { error: 'payment required' }, 'credit'],
-  ['5xx carrying a credit-balance message (the Vercel outage shape)', 503, { error: 'A positive credit balance is required for all requests' }, 'credit'],
   ['403 entitlement', 403, { error: 'model not enabled for this account' }, 'entitlement'],
   ['404 unknown model/route', 404, { error: 'not found' }, 'bad_request'],
 ]
@@ -497,14 +496,24 @@ try {
     assert.equal(h.events[0]!.detail.availability, 'entitlement')
   })
 
-  await check('a 5xx carrying credit text (the real outage shape) transitions', async () => {
-    const h = tieredPolicy((_seen, _signal, call) =>
-      call === 1 ? json(503, { error: 'A positive credit balance is required for all requests' }) : json(200, goodReply((reply) => { reply.model = 'd1:free' })),
-    )
-    const result = await h.policy.decide(request())
-    assert.equal(result.model, 'd1:free')
-    assert.equal(h.seen.length, 2)
-  })
+  for (const [status, availability] of [[503, 'server'], [408, 'timeout']] as const) {
+    await check(`${status} carrying credit text stays transient and never switches tier`, async () => {
+      const h = tieredPolicy(
+        (_seen, _signal, call) =>
+          call === 1 ? json(status, { error: 'A positive credit balance is required for all requests' }) : json(200, goodReply()),
+        { maxRetries: 1 },
+      )
+      const result = await h.policy.decide(request())
+      assert.equal(result.model, 'd1')
+      assert.equal(result.profileId, 'liquid-direct-d1')
+      assert.equal(h.seen.length, 2, 'bounded retry stays on the paid tier')
+      assert.equal(h.seen.every((row) => row.body?.model === 'd1'), true)
+      assert.equal(h.events.length, 0)
+      assert.equal(h.records.some((row) => row.record === 'jev-tier-transition'), false)
+      assert.deepEqual(failures(h.records), ['transient-provider-retry'])
+      assert.equal(h.records.some((row) => JSON.stringify(row).includes(`${availability}:`)), true)
+    })
+  }
 
   await check('one-way latch: a free-tier failure never returns to paid and never re-fires', async () => {
     const h = tieredPolicy(() => json(402, { error: 'payment required' }))
