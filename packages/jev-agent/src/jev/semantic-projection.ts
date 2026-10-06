@@ -550,6 +550,10 @@ export function semanticTargetRef(candidate: Candidate): SemanticTargetRef {
       if (knownName !== null) {
         return { kind: 'resource', key: `resource:${knownName}`, label: `remembered ${knownName}` }
       }
+      const exploreRoute = metaString(candidate, 'exploreRoute')
+      if (candidate.kind === 'MOVE' && candidate.meta.explore === true && exploreRoute !== null) {
+        return { kind: 'route', key: `explore:${exploreRoute}`, label: `explore ${exploreRoute}` }
+      }
       const cell = candidate.target === null ? 'none' : cellKey(candidate.target)
       return { kind: 'position', key: `cell:${cell}`, label: `destination ${cell}` }
     }

@@ -14624,7 +14624,26 @@ function exploreMoveCandidate(
   label: string,
   logRoute: LogRouteMode | null,
   producerSearch: ProducerSearchFacts | null = null,
+  focusItem: string | null = null,
+  goalKind: string = 'explore',
 ): Candidate {
+  // A search chooses a grounded corridor, not a new destination on every
+  // occupied cell. Preserve its purpose and route anchor across realizations.
+  // Only straight, same-level corridors are equivalent here; turns, parallel
+  // corridors and level changes remain distinct. A sensed/remembered bearing
+  // adds its exact source identity when this step actually approaches it.
+  const body = state.self.position
+  const dx = spot.x - Math.floor(body.x)
+  const dz = spot.z - Math.floor(body.z)
+  const bearing = focusItem === null ? null : explorationResourcePosition(state, focusItem, options.blacklistedMoveTargets)
+  let exploreRoute: string | null = null
+  if (spot.y === Math.floor(body.y)) {
+    if (dx === 0 && dz !== 0) exploreRoute = `z${Math.sign(dz)}:x=${spot.x}:y=${spot.y}`
+    else if (dz === 0 && dx !== 0) exploreRoute = `x${Math.sign(dx)}:z=${spot.z}:y=${spot.y}`
+  }
+  if (exploreRoute !== null && bearing !== null && distance(spot, bearing) < distance(body, bearing)) {
+    exploreRoute += `->resource:${bearing.x},${bearing.y},${bearing.z}`
+  }
   return {
     id: `MOVE:${blockId('p', spot)}`,
     kind: 'MOVE',
@@ -14646,6 +14665,8 @@ function exploreMoveCandidate(
       // unexplored terrain, not a route to a sensed source. The typed no-source
       // gap reads it to report `next=explore` instead of `next=escalate`.
       explore: true,
+      purpose: `search:${goalKind}:${producerSearch?.item ?? focusItem ?? 'unexplored_terrain'}`,
+      ...(exploreRoute === null ? {} : { exploreRoute }),
       ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
       // The producer SEARCH facts, when this search exists because the active
       // collect focus declared a mob producer nobody has sensed yet. Fully
@@ -14729,6 +14750,8 @@ function exploreFallbackCandidates(
       moveLabel(best, 'walk toward unexplored terrain', state.self.position),
       logRoute,
       producerSearch,
+      focusItem,
+      goalKind,
     ),
   ]
   const bestKey = blockId('p', best)
@@ -14757,6 +14780,8 @@ function exploreFallbackCandidates(
         moveLabel(spot, 'walk toward unexplored terrain', state.self.position),
         logRoute,
         producerSearch,
+        focusItem,
+        goalKind,
       ),
     )
   }
@@ -14798,6 +14823,9 @@ function logExploreCandidates(state: WorldState, options: CandidateOptions): Can
       spot,
       moveLabel(spot, 'explore toward the log bearing', state.self.position),
       'explore',
+      null,
+      focusItem,
+      state.goalQueue?.current?.kind ?? 'collect',
     ),
   ]
 }

@@ -175,6 +175,32 @@ choices), so no identity collapse was introduced. If Gate E replay evidence
 shows per-leg identity turnover dominates in healthy exploration, the fix is
 a semantic destination anchor, not boundary weakening.
 
+### 2026-10-06 cadence audit — generic exploration corridor identity
+
+Source-bound p26 evidence (`gen-muwesukw-w57gv3`, source `42ffebf5`) contains
+six successful `explore:surface` MOVEs along one corridor, each with zero
+resource progress; four triggers are `path_completed`. Their target-cell
+fallback changed `semanticCandidateKey` on every realization. This violates
+the stable commitment contract in the companion guide §§5.2/5.3/7.2.
+
+The candidate compiler now declares the search purpose and a grounded
+straight, same-level corridor identity (axis, direction, cross-coordinate,
+level, and exact resource bearing when approached). The semantic projection
+uses that route identity for marked exploration MOVEs. Diagonal/unanchored
+steps remain distinct; ordinary destination MOVEs retain their cell identity,
+and explicit approach destinations take precedence. No executor, lease,
+VERIFY, model authority or singleton bypass was added.
+
+Focused regression drives the production compiler and `decide` with a
+counting provider: six settled realizations spend **one** call, retain its
+call ID and replay into current grounded cells. Purpose, real destination,
+parallel-corridor and level changes requery. Red baseline called twice on
+the second step. Epoch, DecisionState, semantic-projection (20/20), novelty
+(4/4) and typecheck proof pass. Other alternatives and meaningful safety or
+progress boundaries still require requery; this does not claim six historical
+live calls would all disappear. Classification: **B/C, LOCAL_ONLY** pending
+fresh composition evidence; no Mission delta.
+
 ## Gate D — concise independent parallel heads (PROVEN)
 
 The head topology was already structurally conformant; this gate formalizes

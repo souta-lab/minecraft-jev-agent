@@ -32,9 +32,9 @@ import { noteRepeatedOutcome } from './src/outcome-ledgers.ts'
 import type { OutcomeLedgersHost, RepeatedOutcomeResult } from './src/outcome-ledgers.ts'
 import type { GuardResult } from './src/policy.ts'
 import { filterRetiredRepeats, RepeatedOutcomeEscalation, REPEATED_OUTCOME_LIMIT_DEFAULT } from './src/repeatedOutcomeEscalation.ts'
-import { buildJevSemanticProjection, JevDecisionEpochs } from './src/jev/semantic-projection.ts'
+import { buildJevSemanticProjection, dedupeSemanticCandidates, JevDecisionEpochs } from './src/jev/semantic-projection.ts'
 import type { DecisionEpoch, SemanticProjectionInput } from './src/jev/semantic-projection.ts'
-import type { Candidate } from './src/candidates.ts'
+import { defaultCandidateOptions, generateCandidates, type Candidate } from './src/candidates.ts'
 import type { JevRequest, JevResult } from './src/jev/client.ts'
 import type { WorldState } from './src/state.ts'
 
@@ -500,4 +500,78 @@ assert.equal(
 )
 assert.equal(g9b.ledger.countFor('MOVE:p*', 'minecraft:overworld:40,-61,-2'), 0)
 
-process.stdout.write('decision-epochs (§18 Gate C): PASS\n')
+// Generic exploration's one-cell realizations used to buy a new WHICH on each
+// path_completed even on the same straight corridor and unchanged purpose.
+// Drive the production candidate compiler and replay orchestrator together.
+function explorationStep(z: number, x: number = 20, y: number = 64): Candidate {
+  const position = { x: x + 0.5, y, z: z + 2.5 }
+  const s = {
+    ...worldState(z),
+    schemaVersion: 1,
+    timestampMs: 0,
+    self: {
+      ...worldState(z).self, position,
+      eyePosition: { ...position, y: y + 1.62 }, onGround: true,
+      yaw: 0, pitch: 0, isDay: true, heldItem: null,
+    },
+    inventory: { counts: {}, slots: [], totalItems: 0 },
+    entities: [], blocks: [], craftingTables: [], furnaces: [],
+    placementSpots: [], descent: [], stepCuts: [], headroomCuts: [],
+    terrain: { standable: [{ x, y, z }, { x, y, z: z - 1 }] },
+    goal: { targetItem: 'obsidian', requiredCount: 10, haveCount: 0, progress: 0, complete: false },
+    goalQueue: {
+      depth: 1, empty: false, hasImpossible: false,
+      current: { id: 'explore', kind: 'explore', description: 'explore', targetItem: null,
+        requiredCount: 1, optionInstanceId: 'explore:surface' },
+    },
+    signals: { ...worldState(z).signals, knownResources: [], stalledMs: 0, lastPathStatus: 'idle' },
+    recentEvents: [],
+  } as unknown as WorldState
+  const offer = generateCandidates(s, { ...defaultCandidateOptions, maxMoveCandidates: 2 })
+  const moves = offer.filter((c) => c.kind === 'MOVE' && c.meta.explore === true)
+  assert.equal(moves.length, 2, 'the full grounded realization set stays available')
+  assert.equal(dedupeSemanticCandidates(moves, {
+    optionInstanceId: 'explore:surface', dimension: OVERWORLD, worldEpoch: 7,
+  }).offered.length, 1, 'collinear exploration cells realize the same semantic route')
+  const move = moves[0]
+  assert.ok(move, 'production compiler must ground an exploration realization')
+  return move
+}
+const explore = harness()
+withProjection(explore.host, {
+  identityContext: { optionInstanceId: 'explore:surface', dimension: OVERWORLD, worldEpoch: 7 },
+})
+let exploreCallId: string | null = null
+for (let step = 0; step < 6; step += 1) {
+  const move = explorationStep(30 - step)
+  const answer = await decide(explore.host, worldState(100 + step), [move, WAIT], 'path_completed', 'explore-route')
+  assert.equal(answer.answers.action!.value, move.id, 'the selected route re-points to its current grounded realization')
+  if (step === 0) exploreCallId = answer.callId
+  assert.equal(answer.callId, exploreCallId, 'only the first provider answer owns continuation')
+  assert.equal(explore.calls.length, 1, 'equivalent explore-route cells must replay without a new provider call')
+  emitSkillOutcomePacket(explore.host, {
+    actionId: move.id, kind: 'MOVE', leaseEpoch: null, status: 'done', failure: null,
+    verified: true, progressed: false, itemsGained: 0, blockRemoved: false,
+    entityDefeated: false, targetName: null, candidate: move, verification: 'arrived',
+  })
+}
+const latestExplore = explorationStep(24)
+const otherPurpose = { ...latestExplore, meta: { ...latestExplore.meta, purpose: 'search:food' } }
+await decide(explore.host, worldState(107), [otherPurpose, WAIT], 'path_completed', 'changed-purpose')
+assert.equal(explore.calls.length, 2, 'a real search-purpose change must requery')
+const destination = { ...latestExplore, meta: { ...latestExplore.meta, approachTarget: '10,64,10', approachLeg: 'explore_resource' } }
+await decide(explore.host, worldState(108), [destination, WAIT], 'path_completed', 'destination')
+assert.equal(explore.calls.length, 3, 'a named destination is a new semantic choice')
+const newDestination = { ...destination, meta: { ...destination.meta, approachTarget: '10,64,11' } }
+await decide(explore.host, worldState(109), [newDestination, WAIT], 'path_completed', 'changed-destination')
+assert.equal(explore.calls.length, 4, 'changing the real destination must requery even on an explore MOVE')
+const unanchoredMove = { ...latestExplore, meta: {} }
+await decide(explore.host, worldState(110), [unanchoredMove, WAIT], 'path_completed', 'ordinary-move')
+await decide(explore.host, worldState(111), [{ ...unanchoredMove, id: 'MOVE:p21_64_24', target: { x: 21, y: 64, z: 24 } }, WAIT], 'path_completed', 'ordinary-destination-change')
+assert.equal(explore.calls.length, 6, 'ordinary destination MOVEs retain exact cell identity')
+await decide(explore.host, worldState(112), [explorationStep(24, 21), WAIT], 'path_completed', 'parallel-corridor')
+assert.equal(explore.calls.length, 7, 'a different exploration corridor must requery')
+await decide(explore.host, worldState(113), [explorationStep(24, 21, 65), WAIT], 'path_completed', 'new-level')
+assert.equal(explore.calls.length, 8, 'an exploration level change must requery')
+
+process.stdout.write('decision-epochs (§18 Gate C): PASS (includes six explore steps / one provider call)\n')
