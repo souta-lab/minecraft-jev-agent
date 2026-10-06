@@ -5198,7 +5198,8 @@ function generateRawCandidates(
           })
         : null
     const isFoodTarget = huntTargets.includes(entity)
-    const goalDrop = goalDropByEntity.get(entity.id) ?? null
+    const nutritionDrop = isFoodTarget ? foodMobDrop(entity.name) : null
+    const goalDrop = goalDropByEntity.get(entity.id) ?? nutritionDrop
     // The label states the fight the LEASE will run, not only what the hand holds
     // right now: `with diamond_sword (armed on attack from stone_pickaxe)`.
     const armNote =

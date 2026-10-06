@@ -244,6 +244,16 @@ addCase('(a1) starving + sensed cow at 12m: a grounded hunt route is offered', (
   }
 })
 
+addCase('(a1b) a nutrition producer commits a kill and edible drop, not a local hit lease', () => {
+  const state = perceive({ counts: {}, food: 11, health: 1, entities: [animal('sheep', 23)], blocks: FLOOR })
+  const result = grounded(state)
+  const hunt = result.candidates.find((candidate) => candidate.meta.foodRoute === 'animal')
+  return {
+    pass: hunt !== undefined && hunt.meta.goalDrop === 'mutton' && hunt.meta.requiresKill === true && hunt.itemName === 'mutton',
+    detail: `candidate=${hunt?.id ?? 'none'} drop=${String(hunt?.meta.goalDrop)} kill=${String(hunt?.meta.requiresKill)} item=${String(hunt?.itemName)}`,
+  }
+})
+
 addCase('(a2) starving + sensed cow: no EAT is invented (nothing edible is held)', () => {
   const state = perceive({ counts: { raw_iron: 2 }, food: 0, health: 1, entities: [animal('cow', 12)], blocks: FLOOR })
   const result = grounded(state)
@@ -907,9 +917,11 @@ addCase('(iv-d) a leg two arms ground for different purposes emits once, carryin
       blocks: [
         // the sensed edible cell, 55 blocks east: past moveMax, lands in tunnelTargets
         { at: { x: 55, y: 64, z: 0 }, name: 'sweet_berry_bush' },
-        // a far sensed log: the goal arm's tunnelTarget, also past moveMax
-        { at: { x: -40, y: 90, z: 0 }, name: 'acacia_log' },
-        // diggable walls on two sides so level steps ground for BOTH arms
+        // Both destinations must ground the SAME eastward leg. Opposite
+        // bearings are separate route purposes under the current identity
+        // contract and cannot honestly assert this shared-leg postcondition.
+        { at: { x: 40, y: 90, z: 0 }, name: 'acacia_log' },
+        // A second wall also checks that the shared eastward leg stays unique.
         { at: { x: 1, y: 64, z: 0 }, name: 'stone' },
         { at: { x: -1, y: 64, z: 0 }, name: 'stone' },
       ],

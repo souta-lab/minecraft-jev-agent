@@ -7536,7 +7536,7 @@ export class Executor {
     // A `goalDrop` ATTACK is a goal-directed hunt: its mechanical completion is
     // the server `entityDead` event for the committed id; the drop reaching the
     // inventory is the second, separately-reported half of its declared
-    // postcondition. An ordinary ATTACK (local safety / food) keeps the
+    // postcondition. An ordinary ATTACK (local safety) keeps the
     // historical bounded melee lease and `attacked` result.
     const goalDrop = readMetaString(candidate, 'goalDrop')
     const beforeDropCount = this.countItem(goalDrop)
@@ -8040,7 +8040,7 @@ export class Executor {
       return result
     }
 
-    // A plain ATTACK (self-defence / food) is complete on a HIT, never on a
+    // A plain ATTACK (self-defence) is complete on a HIT, never on a
     // kill and never on the swing count. Zero observed hits is a typed
     // non-success so the candidate filter, the failure memory and the beta
     // boundary can see that this attack is not working - the live

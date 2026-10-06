@@ -1769,6 +1769,17 @@ export function scannedBlockNames(focusItem: string | null): readonly string[] |
 export const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> = {
   ender_pearl: new Set(['enderman']),
   blaze_rod: new Set(['blaze']),
+  // Nutrition uses the same exact-producer hunt/drop contract as other mob
+  // acquisition. These are the passive food animals already sensed/offered by
+  // the food route; the item facts bind their kill to actual edible inventory.
+  beef: new Set(['cow', 'mooshroom']),
+  porkchop: new Set(['pig']),
+  chicken: new Set(['chicken']),
+  mutton: new Set(['sheep']),
+  rabbit: new Set(['rabbit']),
+  cod: new Set(['cod']),
+  salmon: new Set(['salmon']),
+  tropical_fish: new Set(['tropical_fish']),
   // The starvation half of the table: rotten flesh is edible (foods.json) and
   // its producers are the hostile mobs that actively find the body at night -
   // the only food source a hostile-only world offers. Whether to hunt one is

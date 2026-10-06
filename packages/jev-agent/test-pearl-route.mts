@@ -296,7 +296,7 @@ class CapturingLogger extends EventLogger {
  *   'never-closes' the only enderman stays tracked at 30 m and never closes ->
  *                a typed `out_of_range` hunt end with zero swings.
  */
-type HuntMode = 'retarget' | 'lost' | 'out-of-range' | 'never-closes'
+type HuntMode = 'retarget' | 'lost' | 'out-of-range' | 'never-closes' | 'food-approach' | 'food-no-drop'
 
 interface HuntFixture {
   bot: Bot
@@ -308,13 +308,17 @@ interface HuntFixture {
   pearls: () => number
   pearlsAdded: () => number
   goalsSet: () => unknown[]
+  dispose: () => void
 }
 
 function makeHuntFixture(mode: HuntMode): HuntFixture {
   const emitter = new EventEmitter()
   const feet = new P(0, 64, 0)
   const registryData = require('minecraft-data')('1.21.11')
-  const pearlId = registryData.itemsByName.ender_pearl.id
+  const nutrition = mode === 'food-approach' || mode === 'food-no-drop'
+  const dropName = nutrition ? 'beef' : 'ender_pearl'
+  const pearlId = registryData.itemsByName[dropName].id
+  let approachTimer: ReturnType<typeof setTimeout> | undefined
   let pearls = 0
   let pearlsAdded = 0
   let attacks = 0
@@ -322,12 +326,12 @@ function makeHuntFixture(mode: HuntMode): HuntFixture {
   const goals: unknown[] = []
   const primary: Record<string, unknown> = {
     id: 31,
-    name: 'enderman',
-    kind: 'hostile',
-    height: 2.9,
+    name: nutrition ? 'cow' : 'enderman',
+    kind: nutrition ? 'animal' : 'hostile',
+    height: nutrition ? 1.4 : 2.9,
     isValid: true,
     position:
-      mode === 'never-closes' || mode === 'out-of-range' ? new P(30, 64, 0) : new P(1, 64, 0),
+      nutrition ? new P(23, 64, 0) : mode === 'never-closes' || mode === 'out-of-range' ? new P(30, 64, 0) : new P(1, 64, 0),
   }
   const closer: Record<string, unknown> = {
     id: 32,
@@ -350,12 +354,17 @@ function makeHuntFixture(mode: HuntMode): HuntFixture {
     inventory: {
       count: (id: number) => (id === pearlId ? pearls : 0),
       items: () =>
-        pearls > 0 ? [{ name: 'ender_pearl', type: pearlId, count: pearls, slot: 0 }] : [],
+        pearls > 0 ? [{ name: dropName, type: pearlId, count: pearls, slot: 0 }] : [],
     },
     pathfinder: {
       setMovements: () => undefined,
       setGoal: (goal: unknown) => {
         goals.push(goal)
+        if (nutrition && goal !== null && approachTimer === undefined) {
+          // Simulated path traversal exceeds the ordinary 2.2s ATTACK lease.
+          // Only the already-existing bounded HUNT can reach this producer.
+          approachTimer = setTimeout(() => feet.set(22, 64, 0), 2800)
+        }
       },
       stop: () => undefined,
       getPathTo: () => ({ status: 'success', path: [] }),
@@ -364,6 +373,18 @@ function makeHuntFixture(mode: HuntMode): HuntFixture {
     attack: (entity: { id: number }) => {
       attacks += 1
       attacksByEntity.set(entity.id, (attacksByEntity.get(entity.id) ?? 0) + 1)
+      if (nutrition && entity.id === 31) {
+        emitter.emit('entityHurt', entity, bot.entity)
+        // One damaging hit is insufficient for the acquisition contract.
+        if (attacksByEntity.get(31)! < 2) return
+        if (mode === 'food-approach') {
+          pearls += 1
+          pearlsAdded += 1
+        }
+        emitter.emit('entityDead', entity)
+        delete entities[31]
+        return
+      }
       if (entity.id === 31 && (mode === 'retarget' || mode === 'lost')) {
         // The enderman TELEPORTS: the instance leaves the tracked entity set with
         // no death event. In 'retarget' a second enderman is already sensed.
@@ -393,6 +414,7 @@ function makeHuntFixture(mode: HuntMode): HuntFixture {
     pearls: () => pearls,
     pearlsAdded: () => pearlsAdded,
     goalsSet: () => goals,
+    dispose: () => { if (approachTimer !== undefined) clearTimeout(approachTimer) },
   }
 }
 
@@ -432,6 +454,50 @@ function makeExecutor(fixture: HuntFixture): Executor {
     huntReacquireRadius: 24,
   })
 }
+
+function nutritionCandidate(): Candidate {
+  const state = build({ dimension: 'minecraft:overworld' })
+  state.self = { ...state.self, position: { x: 0, y: 64, z: 0 }, eyePosition: { x: 0, y: 65.62, z: 0 }, health: 1, food: 11 }
+  state.inventory = { slots: [], counts: {}, totalItems: 0 }
+  state.goal = goalState('log', 5)
+  state.goalQueue = queue(queuedGoal('log', 5))
+  state.entities = [{ id: 31, name: 'cow', kind: 'animal', username: null, position: { x: 23, y: 64, z: 0 }, distance: 23, hostile: false, lineOfSight: true }]
+  const candidate = generateGroundedCandidates(state, candidateOptions()).candidates.find((c) => c.id === 'ATTACK:e31')
+  if (candidate === undefined) throw new Error('production compiler withheld the sensed nutrition producer')
+  return candidate
+}
+
+addCase('(nutrition1) a compiled food hunt approaches beyond the local attack lease, kills its target and acquires food', async () => {
+  const fixture = makeHuntFixture('food-approach')
+  try {
+    const candidate = nutritionCandidate()
+    const started = Date.now()
+    const result = await fixtureClaim(makeExecutor(fixture), candidate).completion
+    return {
+      pass: candidate.meta.goalDrop === 'beef' && candidate.meta.requiresKill === true &&
+        Date.now() - started >= 2800 && result.status === 'done' && result.verified === true &&
+        result.entityDefeated === true && result.dropAcquired === true && result.itemsGained === 1 &&
+        result.yieldItem === 'beef' && result.combatOutcome === 'KILL_VERIFIED' &&
+        fixture.attacksOn(31) === 2 && fixture.attacksOn(32) === 0 && fixture.pearlsAdded() === 1 &&
+        fixture.emitter.listenerCount('entityDead') === 0 && fixture.goalsSet().at(-1) === null,
+      detail: `status=${result.status} verified=${result.verified} killed=${result.entityDefeated} drop=${result.dropAcquired} gained=${result.itemsGained} swings=${fixture.attacksOn(31)} outcome=${result.combatOutcome}`,
+    }
+  } finally { fixture.dispose() }
+})
+
+addCase('(nutrition2) a proven nutrition kill without edible inventory is a typed acquisition failure', async () => {
+  const fixture = makeHuntFixture('food-no-drop')
+  try {
+    const result = await fixtureClaim(makeExecutor(fixture), nutritionCandidate()).completion
+    return {
+      pass: result.status === 'failed' && result.failure === 'drop_not_acquired' && result.verified === false &&
+        result.entityDefeated === true && result.dropAcquired === false && result.itemsGained === 0 &&
+        result.combatOutcome === 'DROP_NOT_ACQUIRED' && fixture.attacksOn(31) === 2 &&
+        fixture.attacksOn(32) === 0 && fixture.pearlsAdded() === 0,
+      detail: `status=${result.status} failure=${result.failure} verified=${result.verified} killed=${result.entityDefeated} gained=${result.itemsGained} outcome=${result.combatOutcome}`,
+    }
+  } finally { fixture.dispose() }
+})
 
 // ---------------------------------------------------------------------------
 // (a) a sensed producer is the grounded route and carries the producer facts
