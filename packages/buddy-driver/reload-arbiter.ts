@@ -84,3 +84,21 @@ export class ReloadArbiter {
     this.request(next)
   }
 }
+
+/**
+ * A reload may skip the generation swap only when BOTH the built bundle and
+ * the git stamp are unchanged. The commit-after-dirty-deploy case — a mid-edit
+ * reload built this code while the tree was dirty, then the follow-up commit
+ * changed no file contents — leaves `generationSourceSha`/`generationTreeDirty`
+ * stale; skipping on bundle identity alone would keep every emitted record
+ * claiming a stale/dirty source until a full process restart (measured
+ * p24.32/p24.35/p24.36). A moved stamp IS a changed input: rebuild, restamp.
+ */
+export function reloadStampUnchanged(
+  sourceSha: string | null,
+  treeDirty: boolean,
+  stampedSourceSha: string | null,
+  stampedTreeDirty: boolean,
+): boolean {
+  return sourceSha === stampedSourceSha && treeDirty === stampedTreeDirty
+}

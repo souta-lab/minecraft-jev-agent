@@ -14,7 +14,7 @@ import {
 } from './resident-safety.ts'
 import type { GenerationResourceCounts } from './resident-types.ts'
 import { commitOwner, swapGeneration, type OwnershipFields, type SwapPorts } from './generation-swap.ts'
-import { ReloadArbiter } from './reload-arbiter.ts'
+import { ReloadArbiter, reloadStampUnchanged } from './reload-arbiter.ts'
 
 interface LogEntry {
   event: string
@@ -391,6 +391,36 @@ addCase('#13 generation-owned listeners are removable and untracked by the lease
     removed.timers === 0 &&
     registry.isDisposed()
   return { pass, detail: `before=${JSON.stringify(before)} owned=${JSON.stringify(owned)} after=${JSON.stringify(removed)} emitterListeners=${emitter.listenerCount('physicsTick')}` }
+})
+
+addCase('#24.36 reloadStampUnchanged: skip only when the git stamp also matches', async () => {
+  const same = reloadStampUnchanged('abc', false, 'abc', false)
+  const shaMoved = reloadStampUnchanged('def', false, 'abc', false)
+  const dirtyMoved = reloadStampUnchanged('abc', true, 'abc', false)
+  const dirtyCleared = reloadStampUnchanged('abc', false, 'abc', true)
+  const nullVsSha = reloadStampUnchanged(null, false, 'abc', false)
+  const nullNull = reloadStampUnchanged(null, false, null, false)
+  const pass = same && !shaMoved && !dirtyMoved && !dirtyCleared && !nullVsSha && nullNull
+  return {
+    pass,
+    detail: `same=${same} shaMoved=${shaMoved} dirtyMoved=${dirtyMoved} dirtyCleared=${dirtyCleared} nullVsSha=${nullVsSha} nullNull=${nullNull}`,
+  }
+})
+
+addCase('#24.36 the unchanged skip consults the git stamp (commit-after-dirty-deploy restamps)', async () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const src = readFileSync(join(here, 'agent-runner.mts'), 'utf8')
+  const anchor = src.indexOf("built.outfile === currentBundle")
+  const window = anchor === -1 ? '' : src.slice(anchor, anchor + 1600)
+  const pass =
+    anchor !== -1 &&
+    window.includes('reloadStampUnchanged(') &&
+    window.includes('gitCommit()') &&
+    window.includes('RELOAD_PROVENANCE_MOVED')
+  return {
+    pass,
+    detail: `anchor=${anchor} stampCheck=${window.includes('reloadStampUnchanged(')} provenanceLog=${window.includes('RELOAD_PROVENANCE_MOVED')}`,
+  }
 })
 
 addCase('#13 every generation teardown in agent-runner routes through disposeGeneration', async () => {

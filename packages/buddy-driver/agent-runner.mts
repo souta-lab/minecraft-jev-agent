@@ -98,7 +98,7 @@ import {
   type HostLockOutcome,
   type HostLockReport,
 } from './host-durability.ts'
-import { ReloadArbiter } from './reload-arbiter.ts'
+import { ReloadArbiter, reloadStampUnchanged } from './reload-arbiter.ts'
 import { acceptsWorldMemoryProposal, resetWorldEpoch } from './world-epoch.ts'
 import {
   RESPAWN_INVENTORY_POLL_MS,
@@ -2586,9 +2586,25 @@ async function performReload(trigger: string): Promise<void> {
   try {
     const built = await buildGeneration()
     if (built.outfile === currentBundle && generationModule !== null) {
-      stats.reloadsSkippedUnchanged += 1
-      log('RELOAD', { ok: true, trigger, skipped: 'unchanged', ms: Date.now() - started })
-      return
+      const skipSha = gitCommit()
+      const skipDirty = gitTreeDirty()
+      if (reloadStampUnchanged(skipSha, skipDirty, generationSourceSha, generationTreeDirty)) {
+        stats.reloadsSkippedUnchanged += 1
+        log('RELOAD', { ok: true, trigger, skipped: 'unchanged', ms: Date.now() - started })
+        return
+      }
+      // The bundle is byte-identical but the git stamp moved - the canonical
+      // commit-after-dirty-deploy case: a mid-edit reload already built this
+      // code with a dirty stamp, the follow-up commit changed no file
+      // contents, and skipping on bundle identity alone would keep every
+      // emitted record claiming a stale/dirty source until a full process
+      // restart (measured p24.32/p24.35/p24.36). Fall through to the swap so
+      // the next GENERATION_READY stamps the truth.
+      log('RELOAD_PROVENANCE_MOVED', {
+        trigger,
+        from: { sourceSha: generationSourceSha, treeDirty: generationTreeDirty },
+        to: { sourceSha: skipSha, treeDirty: skipDirty },
+      })
     }
     const mod = (await import(`${pathToFileURL(built.outfile).href}?v=${built.hash}`)) as GenerationModule
     const readinessError = generationModuleReadinessError(mod, CONTRACT_VERSION)
