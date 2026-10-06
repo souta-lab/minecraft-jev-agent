@@ -19,6 +19,11 @@ Freshness is explicit: inventory observation age must be within 15s. Missing,
 stale, dead/recycled-PID and inactive/quiesced cases cannot become current truth.
 Regenerate before trusting a cached view; no polling is required.
 
+Runner identity accepts the standard `capability-run.mjs` launcher by its exact
+script/run/port/boot SHA and canonical run directory, or a saved-world helper
+inside that run. Merely mentioning a run path is insufficient. Launcher SHA
+binds HOST boot separately from a later hot-reloaded generation SHA.
+
 ## Ownership and resume order
 
 | Input/view | Ownership |

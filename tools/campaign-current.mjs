@@ -14,6 +14,21 @@ const text = (value, limit = 400) => typeof value === 'string' ? value.slice(0, 
 const json = (path) => { try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null } }
 const data = (reply) => reply?.data ?? reply
 
+/** Match the existing fresh-run launcher or a run-owned saved-world helper. */
+export function campaignRunnerMatches(argv, registry) {
+  if (typeof registry.runDir !== 'string' || typeof registry.runId !== 'string') return false
+  if (argv.some((arg) => arg.startsWith(`${registry.runDir}/`) && arg.endsWith('/resume-stack.py'))) return true
+  const value = (flag, fallback = null) => {
+    const index = argv.indexOf(flag)
+    return index < 0 ? fallback : argv[index + 1]
+  }
+  const bootSha = registry.hostBootSha ?? registry.sha
+  return argv.includes(join(ROOT, 'tools/capability-run.mjs')) &&
+    registry.runDir === join(ROOT, 'runs/capability-campaign/runs', registry.runId) &&
+    value('--run-id') === registry.runId && Number(value('--port', 26601)) === Number(registry.port) &&
+    (bootSha == null || value('--sha') === bootSha)
+}
+
 /** Exact campaign process identity, including recycled PID rejection. Never signals processes. */
 export function inspectCampaignProcess(pid, role, registry) {
   const result = { pid: Number.isInteger(pid) ? pid : null, alive: false, identityMatches: false }
@@ -27,7 +42,7 @@ export function inspectCampaignProcess(pid, role, registry) {
     if (role === 'resident') result.identityMatches = cwd === registry.runtimeDir && argv.some((arg) => arg.endsWith('agent-runner.mts'))
     if (role === 'supervisor') result.identityMatches = argv.some((arg) => arg.endsWith('resident-supervisor.mjs')) && argv.includes(registry.runtimeDir)
     if (role === 'leaf') result.identityMatches = argv.includes(join(registry.runDir, 'server', 'server.properties'))
-    if (role === 'runner') result.identityMatches = argv.some((arg) => arg.includes(registry.runDir))
+    if (role === 'runner') result.identityMatches = campaignRunnerMatches(argv, registry)
   } catch { /* unavailable process truth */ }
   return result
 }

@@ -1,9 +1,22 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { archiveCampaignHistory, buildCampaignCurrent, captureCampaignCurrent, inspectCampaignProcess } from './campaign-current.mjs'
+import { archiveCampaignHistory, buildCampaignCurrent, campaignRunnerMatches, captureCampaignCurrent, inspectCampaignProcess } from './campaign-current.mjs'
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const runnerRegistry = { runId: 'portal-test', runDir: join(root, 'runs/capability-campaign/runs/portal-test'), port: 26614, sha: 'new-generation', hostBootSha: 'boot' }
+const runnerArgv = ['bun', join(root, 'tools/capability-run.mjs'), '--sha', 'boot', '--run-id', 'portal-test', '--port', '26614']
+assert.equal(campaignRunnerMatches(runnerArgv, runnerRegistry), true, 'standard launcher owns the exact run without a runDir argv')
+assert.equal(campaignRunnerMatches(runnerArgv, { ...runnerRegistry, hostBootSha: undefined, sha: 'boot' }), true, 'claiming registry binds launch SHA')
+assert.equal(campaignRunnerMatches(runnerArgv, { ...runnerRegistry, runId: 'other-run' }), false)
+assert.equal(campaignRunnerMatches(runnerArgv, { ...runnerRegistry, port: 26615 }), false)
+assert.equal(campaignRunnerMatches(runnerArgv, { ...runnerRegistry, hostBootSha: 'other-boot' }), false)
+assert.equal(campaignRunnerMatches(['python3', join(runnerRegistry.runDir, 'minors/p1.1/resume/resume-stack.py')], runnerRegistry), true)
+assert.equal(campaignRunnerMatches(['node', 'unrelated.mjs', runnerRegistry.runDir], runnerRegistry), false, 'an unrelated process mentioning the run path does not own it')
+assert.equal(campaignRunnerMatches(runnerArgv, { ...runnerRegistry, runDir: '/unrelated' }), false)
 
 const at = '2026-10-06T09:00:00.000Z'
 const registry = {
