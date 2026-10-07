@@ -12,11 +12,13 @@ import {
   ledgerIsConsistent,
   selectLedgerSnapshot,
   selectSystem2LedgerSnapshot,
+  system2FrontierOpportunity,
   SYSTEM2_MISSION_PLAN_IDENTITY,
 } from './generation-entry.ts'
 import { createRecipeIndex, planNextCraftStep } from '../jev-agent/src/crafting.ts'
 import type { LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import { buildLadder, isMandatoryRung, RUNGS } from './planner.ts'
+import type { DurableLadderProgress } from './planner.ts'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
@@ -148,10 +150,46 @@ const cases: Case[] = [
         planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
       })
       const saved: GoalQueueSnapshot = { counter: 6, goals: [stale, food], basis, planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY } }
-      const counts = { iron_ingot: 4, stick: 4, spruce_planks: 3, spruce_log: 1 }
-      const ladder = buildLadder(counts, emptyWorldMemory(), undefined, { resumeRungIndex: 9 })
+      const counts = {
+        iron_ingot: 4,
+        stick: 4,
+        spruce_planks: 3,
+        spruce_log: 1,
+        furnace: 1,
+        cobblestone: 112,
+        coal: 7,
+      }
+      // The frozen p27 scene has verified crafting tables in world memory. The
+      // durable iron_ingot floor is only usable while that world-outcome rung is
+      // still live; an empty-world fixture would correctly fall back to the
+      // crafting_table rung and would not represent this restore boundary.
+      const liveWorld = emptyWorldMemory()
+      liveWorld.craftingTables.push({ x: 7197, y: 1, z: 1278, status: 'verified' })
+      const ladder = buildLadder(counts, liveWorld, undefined, { resumeRungIndex: 9 })
       const frontierRung = RUNGS.find((rung) => rung.id === ladder.rungId)
       const frontierGoal = frontierRung !== undefined && isMandatoryRung(frontierRung) ? ladder.goals[0] ?? null : null
+      const durableProgress: DurableLadderProgress = {
+        rungId: 'iron_ingot',
+        rungIndex: 8,
+        sources: ['ledger-basis'],
+        evidence: ['basis:frontier=iron_pickaxe@9'],
+      }
+      const opportunity = system2FrontierOpportunity(
+        frontierGoal,
+        { rungId: ladder.rungId, rungIndex: ladder.rungIndex },
+        counts,
+        liveWorld,
+        durableProgress,
+        recipes,
+      )
+      const staleOpportunity = system2FrontierOpportunity(
+        frontierGoal,
+        { rungId: 'wood', rungIndex: 0 },
+        counts,
+        liveWorld,
+        durableProgress,
+        recipes,
+      )
       const first = frontierGoal?.targetItem === 'iron_pickaxe'
         ? planNextCraftStep(recipes, frontierGoal.targetItem, counts, false, frontierGoal.requiredCount ?? 1).op
         : null
@@ -178,6 +216,9 @@ const cases: Case[] = [
         firstLabel === 'CRAFT:spruce_planksx4' &&
         ladder.rungId === 'iron_pickaxe' &&
         frontierGoal?.targetItem === 'iron_pickaxe' &&
+        opportunity?.targetItem === 'iron_pickaxe' &&
+        opportunity.firstCraft.item === 'spruce_planks' && opportunity.firstCraft.count === 4 &&
+        staleOpportunity === null &&
         tableCraft?.type === 'craft' && tableCraft.item === 'crafting_table' &&
         tablePlace?.type === 'place' && tablePlace.item === 'crafting_table' &&
         ironPickaxeCraft?.type === 'craft' && ironPickaxeCraft.item === 'iron_pickaxe' && ironPickaxeCraft.requiresTable &&

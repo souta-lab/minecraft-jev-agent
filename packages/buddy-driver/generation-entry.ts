@@ -40,7 +40,7 @@ import {
   SYSTEM2_HUMAN_MISSION,
 } from './mercury-system2.ts'
 import { MERCURY_DEATH_HISTORY_LIMIT } from './mercury-system2.ts'
-import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
+import type { MercuryFrontierOpportunity, MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
 import { SYSTEM2_SEMANTIC_HISTORY_LIMIT } from '../jev-agent/src/system2/causal-history.ts'
 import {
   formatSystem2PayloadAbsentLine,
@@ -84,6 +84,7 @@ import {
   worldOutcomeRungFloor,
 } from './planner.ts'
 import { createRecipeIndex, planNextCraftStep } from '../jev-agent/src/crafting.ts'
+import type { RecipeIndex } from '../jev-agent/src/crafting.ts'
 import type { Counts, DurableLadderProgress, DurableLadderSource, Rung } from './planner.ts'
 import { formatPlanIdentity } from '../jev-agent/src/goalQueue.ts'
 import type { PlanIdentity, PlanObsoleteProof } from '../jev-agent/src/goalQueue.ts'
@@ -1456,6 +1457,34 @@ export function planIdentityFor(
   }
 }
 
+/**
+ * Project a directly executable first craft step for System2 only while the
+ * same code-owned frontier is still live. The result is contextual evidence;
+ * this helper never creates or selects a queue goal.
+ */
+export function system2FrontierOpportunity(
+  goal: PlannedGoal | null,
+  expectedFrontier: { rungId: string; rungIndex: number },
+  counts: Counts,
+  world: ResidentWorldMemory,
+  durableProgress: DurableLadderProgress | null | undefined,
+  recipes: RecipeIndex,
+): MercuryFrontierOpportunity | null {
+  if (goal?.kind !== 'craft' || typeof goal.targetItem !== 'string') return null
+  const currentFrontier = deriveResumeRung(counts, world, undefined, durableProgress)
+  if (currentFrontier.rungId !== expectedFrontier.rungId || currentFrontier.rungIndex !== expectedFrontier.rungIndex) {
+    return null
+  }
+  const next = planNextCraftStep(recipes, goal.targetItem, counts, false, goal.requiredCount ?? 1).op
+  if (next?.type !== 'craft' || next.requiresTable) return null
+  return {
+    targetItem: goal.targetItem,
+    targetCount: goal.requiredCount ?? 1,
+    description: goal.description,
+    firstCraft: { item: next.item, count: next.count },
+  }
+}
+
 /** Stable semantic identity for System2-owned plans; it carries no ladder frontier. */
 export const SYSTEM2_MISSION_PLAN_IDENTITY: Readonly<PlanIdentity> = Object.freeze({
   rungId: 'mission:defeat_ender_dragon',
@@ -1973,6 +2002,7 @@ export function buildMercurySummary(
   trigger: MercuryTriggerReason,
   deathRecovery: DeathRecoveryContext | null = null,
   log?: (event: string, detail?: Record<string, unknown>) => void,
+  frontierOpportunity: MercuryFrontierOpportunity | null = null,
 ): MercuryStateSummary {
   const counts = inventoryCounts(bot)
   const entity = bot.entity
@@ -2061,6 +2091,7 @@ export function buildMercurySummary(
       hasImpossible: request.goalQueueState.hasImpossible,
     },
     objective: activeObjective,
+    ...(frontierOpportunity === null ? {} : { frontierOpportunity }),
     ...(request.recentSemanticOutcomes === undefined || request.recentSemanticOutcomes.length === 0
       ? {}
       : { recentSemanticOutcomes: request.recentSemanticOutcomes.slice(-SYSTEM2_SEMANTIC_HISTORY_LIMIT) }),
@@ -2761,20 +2792,6 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const frontierRung = RUNGS.find((rung) => rung.id === ladder.rungId)
   const frontierGoal =
     frontierRung !== undefined && isMandatoryRung(frontierRung) ? ladder.goals[0] ?? null : null
-  const frontierCraftStep =
-    frontierGoal?.kind === 'craft' && typeof frontierGoal.targetItem === 'string'
-      ? planNextCraftStep(
-          createRecipeIndex(ctx.bot.registry),
-          frontierGoal.targetItem,
-          counts,
-          false,
-          frontierGoal.requiredCount ?? 1,
-        ).op
-      : null
-  const frontierStepLabel =
-    frontierCraftStep?.type === 'craft' && !frontierCraftStep.requiresTable
-      ? `CRAFT:${frontierCraftStep.item}x${frontierCraftStep.count}`
-      : null
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
   }
@@ -2828,10 +2845,28 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const vtrReachProbe = process.env.BUDDY_VTR_REACH_PROBE?.trim() === '1'
   const configuredPlannerMode = resolvePlannerMode()
   const plannerMode = vtrReachProbe ? 'llm' : configuredPlannerMode
+  const recipeIndex = createRecipeIndex(ctx.bot.registry)
+  const currentFrontierOpportunity = (): MercuryFrontierOpportunity | null => {
+    return plannerMode === 'deterministic'
+      ? null
+      : system2FrontierOpportunity(
+          frontierGoal,
+          { rungId: ladder.rungId, rungIndex: ladder.rungIndex },
+          inventoryCounts(bot),
+          world,
+          durableLadderProgress,
+          recipeIndex,
+        )
+  }
+  const restoreOpportunity = currentFrontierOpportunity()
   const readyFrontierReconsideration =
-    plannerMode !== 'deterministic' && frontierGoal !== null && frontierStepLabel !== null
-      ? { item: frontierGoal.targetItem as string, description: frontierGoal.description, firstCan: frontierStepLabel }
-      : null
+    restoreOpportunity === null
+      ? null
+      : {
+          item: restoreOpportunity.targetItem,
+          description: restoreOpportunity.description,
+          firstCan: `CRAFT:${restoreOpportunity.firstCraft.item}x${restoreOpportunity.firstCraft.count}`,
+        }
   if (readyFrontierReconsideration !== null) {
     ctx.log('SYSTEM2_FRONTIER_READY_AT_RESTORE', {
       frontier: readyFrontierReconsideration,
@@ -2900,6 +2935,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
             trigger,
             ctx.deathRecovery ?? null,
             (event, detail) => ctx.log(event, detail),
+            currentFrontierOpportunity(),
           ),
         log: (event, detail) => ctx.log(event, detail),
         callsPath: mercuryCallsPath(ctx.logDir),

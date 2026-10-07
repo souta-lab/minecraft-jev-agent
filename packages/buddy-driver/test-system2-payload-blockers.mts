@@ -299,6 +299,45 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
 }
 
 // ---------------------------------------------------------------------------
+// (i2) a directly executable frontier recipe is visible to fresh System2 WHAT
+// ---------------------------------------------------------------------------
+
+{
+  const frontierOpportunity = {
+    targetItem: 'iron_pickaxe',
+    targetCount: 1,
+    description: 'craft 1 x iron_pickaxe',
+    firstCraft: { item: 'spruce_planks', count: 4 },
+  }
+  const emptyRequest: System2PlanRequest = {
+    ...liveRequest(),
+    goalQueueState: { depth: 0, current: null, empty: true, hasImpossible: false, done: 0, goals: [] },
+  }
+  const withOpportunity = buildMercurySummary(
+    liveBot(),
+    liveWorld(),
+    emptyRequest,
+    'no_candidate',
+    null,
+    undefined,
+    frontierOpportunity,
+  )
+  const withoutOpportunity = buildMercurySummary(liveBot(), liveWorld(), emptyRequest, 'no_candidate')
+  check(
+    '(i2) the directly executable frontier recipe is exposed as evidence, not a queue choice',
+    JSON.stringify(withOpportunity.frontierOpportunity) === JSON.stringify(frontierOpportunity) &&
+      withOpportunity.queue.current === null &&
+      withoutOpportunity.frontierOpportunity === undefined,
+    JSON.stringify({ opportunity: withOpportunity.frontierOpportunity, queue: withOpportunity.queue }),
+  )
+  check(
+    '(i2) the cache key changes when the frontier opportunity changes',
+    hashMercuryState(withOpportunity) !== hashMercuryState(withoutOpportunity),
+    `${hashMercuryState(withOpportunity)} vs ${hashMercuryState(withoutOpportunity)}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // (ii) a summon with nothing withheld: the payload is unchanged
 // ---------------------------------------------------------------------------
 

@@ -1124,6 +1124,7 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
     ores: [...state.knownOres].sort(),
     queue: state.queue,
     objective: state.objective,
+    frontierOpportunity: state.frontierOpportunity ?? null,
     wait: Math.min(state.consecutiveWait, 3),
     failures: state.recentFailures,
     semanticOutcomes: state.recentSemanticOutcomes ?? [],
@@ -1265,6 +1266,14 @@ export function resolveMercuryEnablement(
 
 export const SYSTEM2_HUMAN_MISSION = 'Defeat the Ender Dragon' as const
 
+/** A code-computed, live recipe opportunity. It informs System2 without selecting WHAT. */
+export interface MercuryFrontierOpportunity {
+  targetItem: string
+  targetCount: number
+  description: string
+  firstCraft: { item: string; count: number }
+}
+
 export interface MercuryStateSummary {
   /** Human-provided long-horizon objective; benchmark gates are not planner inputs. */
   humanMission: typeof SYSTEM2_HUMAN_MISSION
@@ -1294,6 +1303,8 @@ export interface MercuryStateSummary {
    * because it may only be a compatibility seed after the queue is empty.
    */
   objective: { targetItem: string; requiredCount: number; haveCount: number; complete: boolean } | null
+  /** Current unsatisfied capability's first directly executable craft step, when one exists. */
+  frontierOpportunity?: MercuryFrontierOpportunity
   /**
    * The most recent durable death-hazard facts, NEWEST FIRST, bounded by
    * `MERCURY_DEATH_HISTORY_LIMIT`. This is world memory, not a log: it is the
@@ -1416,8 +1427,8 @@ export function mercuryCostUsd(model: string, usage: MercuryUsageLike | null | u
 // ---------------------------------------------------------------------------
 
 /** #33: Mercury cache schema/contract version. Bump when the summary contract changes. */
-export const MERCURY_CACHE_SCHEMA_VERSION = 8
-export const MERCURY_CACHE_FILE_VERSION = 8
+export const MERCURY_CACHE_SCHEMA_VERSION = 9
+export const MERCURY_CACHE_FILE_VERSION = 9
 
 export interface MercuryWorldKey {
   serverId: string
@@ -2036,6 +2047,13 @@ You do NOT control the body. Mineflayer owns mechanics and System One owns the n
 
 Human mission: ${SYSTEM2_HUMAN_MISSION}. Choose the next WHAT from current world facts and grounded executable alternatives that can advance it. The mission does not prescribe a fixed subgoal order. The objective is the active item-counted queue goal, or null when there is none; it is local work, not a mandatory stage. When objective is null, choose useful work from the mission and current evidence instead of assuming a compatibility objective.
 Health, food, and any typed starvation fact are live body truth. Use them as safety context while choosing among grounded alternatives; they do not prescribe a fixed semantic subgoal.
+
+When frontierOpportunity is present, it is a code-computed recipe fact naming
+the current unsatisfied capability and a first craft step executable from live
+inventory. It is context only: it does not require that goal or set a fixed
+order. Weigh it with health, food, the current objective, and other grounded
+facts. Express any choice as a high-level goal from allowedGoals, never as a
+craft operation or motor command.
 
 Answer in NATURAL LANGUAGE: one or two short sentences saying WHAT should happen
 next and why, naming the real Minecraft item, resource or portal step involved.
