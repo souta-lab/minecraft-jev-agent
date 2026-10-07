@@ -217,7 +217,8 @@ const cases: Case[] = [
         ladder.rungId === 'iron_pickaxe' &&
         frontierGoal?.targetItem === 'iron_pickaxe' &&
         opportunity?.targetItem === 'iron_pickaxe' &&
-        opportunity.firstCraft.item === 'spruce_planks' && opportunity.firstCraft.count === 4 &&
+        opportunity.firstStep.type === 'craft' &&
+        opportunity.firstStep.item === 'spruce_planks' && opportunity.firstStep.count === 4 &&
         staleOpportunity === null &&
         tableCraft?.type === 'craft' && tableCraft.item === 'crafting_table' &&
         tablePlace?.type === 'place' && tablePlace.item === 'crafting_table' &&
@@ -228,6 +229,113 @@ const cases: Case[] = [
         reconsidered?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'impossible' &&
         reconsidered?.snapshot.goals.find((goal) => goal.id === 'g6:collect:food')?.status === 'impossible' &&
         protectedSelection?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'active' &&
+        queue.current === null
+      )
+    })(),
+  },
+  {
+    name: 'a held crafting table makes the iron-pickaxe frontier startable before restoring optional surface recovery',
+    expected: true,
+    observed: (() => {
+      const basis: LedgerBasis = {
+        worldKey: '127.0.0.1:26615|minecraft:overworld|1',
+        frontierRungId: 'iron_pickaxe',
+        frontierRungIndex: 9,
+      }
+      const expectedFrontier = { rungId: basis.frontierRungId, rungIndex: basis.frontierRungIndex }
+      const stale = queued({
+        id: 'g5:explore',
+        kind: 'explore',
+        description: 'explore surface terrain',
+        targetItem: null,
+        status: 'active',
+        optionInstanceId: 'explore:surface',
+        optionTemplateId: 'explore:surface',
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      })
+      const food = queued({
+        id: 'g6:collect:food',
+        kind: 'collect',
+        description: 'collect food',
+        targetItem: 'food',
+        status: 'pending',
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      })
+      const saved: GoalQueueSnapshot = {
+        counter: 6,
+        goals: [stale, food],
+        basis,
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      }
+      const counts = {
+        raw_iron: 16,
+        iron_ingot: 4,
+        stick: 4,
+        spruce_planks: 3,
+        crafting_table: 1,
+        coal: 8,
+        cobblestone: 112,
+        furnace: 1,
+      }
+      const liveWorld = emptyWorldMemory()
+      const mandatory = {
+        kind: 'craft' as const,
+        targetItem: 'iron_pickaxe',
+        requiredCount: 1,
+        description: 'craft 1 x iron_pickaxe',
+      }
+      const durableProgress: DurableLadderProgress = {
+        rungId: 'iron_ingot',
+        rungIndex: 8,
+        sources: ['ledger-basis'],
+        evidence: ['basis:frontier=iron_pickaxe@9'],
+      }
+      const opportunity = system2FrontierOpportunity(
+        mandatory,
+        expectedFrontier,
+        counts,
+        liveWorld,
+        durableProgress,
+        recipes,
+      )
+      const noTableOpportunity = system2FrontierOpportunity(
+        mandatory,
+        expectedFrontier,
+        { ...counts, crafting_table: 0 },
+        liveWorld,
+        durableProgress,
+        recipes,
+      )
+      const readyFrontier = opportunity === null
+        ? null
+        : {
+            item: opportunity.targetItem,
+            description: opportunity.description,
+            firstCan: opportunity.firstStep.type === 'place'
+              ? 'PLACE:crafting_table'
+              : `CRAFT:${opportunity.firstStep.item}x${opportunity.firstStep.count}`,
+          }
+      const selected = selectSystem2LedgerSnapshot(saved, null, counts, liveWorld, readyFrontier)
+      const untouched = selectSystem2LedgerSnapshot(saved, null, counts, liveWorld)
+      const afterPlacement = planNextCraftStep(
+        recipes,
+        'iron_pickaxe',
+        { iron_ingot: 4, stick: 4, spruce_planks: 3 },
+        true,
+        1,
+      ).op
+      const queue = new GoalQueue()
+      if (selected !== null) queue.restore(selected.snapshot)
+      return (
+        opportunity?.firstStep.type === 'place' &&
+        opportunity.firstStep.item === 'crafting_table' &&
+        readyFrontier?.firstCan === 'PLACE:crafting_table' &&
+        noTableOpportunity === null &&
+        evaluateSystem2LedgerRestoreBasis(saved, basis).accept &&
+        selected?.reconsidered.map((goal) => goal.id).join(',') === 'g5:explore,g6:collect:food' &&
+        selected.snapshot.goals.every((goal) => goal.status === 'impossible') &&
+        untouched?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'active' &&
+        afterPlacement?.type === 'craft' && afterPlacement.item === 'iron_pickaxe' && afterPlacement.requiresTable &&
         queue.current === null
       )
     })(),

@@ -308,7 +308,7 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     targetItem: 'iron_pickaxe',
     targetCount: 1,
     description: 'craft 1 x iron_pickaxe',
-    firstCraft: { item: 'spruce_planks', count: 4 },
+    firstStep: { type: 'craft' as const, item: 'spruce_planks', count: 4 },
   }
   const emptyRequest: System2PlanRequest = {
     ...liveRequest(),

@@ -1271,7 +1271,7 @@ export interface MercuryFrontierOpportunity {
   targetItem: string
   targetCount: number
   description: string
-  firstCraft: { item: string; count: number }
+  firstStep: { type: 'craft'; item: string; count: number } | { type: 'place'; item: 'crafting_table' }
 }
 
 export interface MercuryStateSummary {
@@ -2049,9 +2049,9 @@ Human mission: ${SYSTEM2_HUMAN_MISSION}. Choose the next WHAT from current world
 Health, food, and any typed starvation fact are live body truth. Use them as safety context while choosing among grounded alternatives; they do not prescribe a fixed semantic subgoal.
 
 When frontierOpportunity is present, it names the current mandatory frontier
-and a first craft step executable from live inventory. It is not a scripted
-route: you still choose the WHAT, and the grounded alternatives still bound
-what is possible. When the queue objective is empty, keep this mandatory
+and a first craft or station-placement step executable from live inventory.
+It is not a scripted route: you still choose the WHAT, and the grounded
+alternatives still bound what is possible. When the queue objective is empty, keep this mandatory
 frontier ahead of replaceable optional food or surface recovery unless those
 alternatives contain a grounded food route or an immediate grounded threat
 requires survival work first. Hunger by itself does not ground a food source;

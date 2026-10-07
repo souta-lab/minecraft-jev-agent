@@ -1458,9 +1458,12 @@ export function planIdentityFor(
 }
 
 /**
- * Project a directly executable first craft step for System2 only while the
- * same code-owned frontier is still live. The result is contextual evidence;
- * this helper never creates or selects a queue goal.
+ * Project the directly executable first craft or station-placement step for
+ * System2 only while the same code-owned frontier is still live. In
+ * particular, a held crafting table makes its local PLACE step a valid start
+ * of a mandatory frontier even though the eventual recipe needs the table.
+ * The result is contextual evidence; this helper never creates or selects a
+ * queue goal.
  */
 export function system2FrontierOpportunity(
   goal: PlannedGoal | null,
@@ -1476,12 +1479,17 @@ export function system2FrontierOpportunity(
     return null
   }
   const next = planNextCraftStep(recipes, goal.targetItem, counts, false, goal.requiredCount ?? 1).op
-  if (next?.type !== 'craft' || next.requiresTable) return null
+  const firstStep = next?.type === 'craft' && !next.requiresTable
+    ? { type: 'craft' as const, item: next.item, count: next.count }
+    : next?.type === 'place' && next.item === 'crafting_table' && countResource(counts, 'crafting_table') >= 1
+      ? { type: 'place' as const, item: 'crafting_table' as const }
+      : null
+  if (firstStep === null) return null
   return {
     targetItem: goal.targetItem,
     targetCount: goal.requiredCount ?? 1,
     description: goal.description,
-    firstCraft: { item: next.item, count: next.count },
+    firstStep,
   }
 }
 
@@ -2865,7 +2873,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       : {
           item: restoreOpportunity.targetItem,
           description: restoreOpportunity.description,
-          firstCan: `CRAFT:${restoreOpportunity.firstCraft.item}x${restoreOpportunity.firstCraft.count}`,
+          firstCan: restoreOpportunity.firstStep.type === 'place'
+            ? 'PLACE:crafting_table'
+            : `CRAFT:${restoreOpportunity.firstStep.item}x${restoreOpportunity.firstStep.count}`,
         }
   if (readyFrontierReconsideration !== null) {
     ctx.log('SYSTEM2_FRONTIER_READY_AT_RESTORE', {
