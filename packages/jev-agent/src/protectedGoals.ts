@@ -48,6 +48,12 @@ export interface ProtectableGoal {
   optionTemplateId?: string | null
   semanticOptionInstanceId?: string | null
   semanticOptionTemplateId?: string | null
+  /** Legacy queue snapshots may retain semantic identity only in the spec. */
+  optionSpec?: {
+    id?: string
+    semanticOptionInstanceId?: string
+    semanticOptionTemplateId?: string
+  }
 }
 
 /** A goal is protected when the deterministic compiler marked it protected or core. */
@@ -82,6 +88,9 @@ export function isReplaceableRecoveryGoal(goal: ProtectableGoal): boolean {
     goal.semanticOptionTemplateId,
     goal.optionInstanceId,
     goal.optionTemplateId,
+    goal.optionSpec?.semanticOptionInstanceId,
+    goal.optionSpec?.semanticOptionTemplateId,
+    goal.optionSpec?.id,
   ]
   return ids.some((id) => id === 'explore:surface' || id?.startsWith('explore:surface#') === true)
 }

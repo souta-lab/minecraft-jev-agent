@@ -240,6 +240,58 @@ const cases: Case[] = [
     })(),
   },
   {
+    name: 'System2 restore recognizes a legacy surface recovery template nested only in optionSpec',
+    expected: true,
+    observed: (() => {
+      const basis: LedgerBasis = {
+        worldKey: '127.0.0.1:26615|minecraft:overworld|1',
+        frontierRungId: 'iron_pickaxe',
+        frontierRungIndex: 9,
+      }
+      const legacySurface = queued({
+        id: 'g5:explore',
+        kind: 'explore',
+        description: 'explore surface terrain',
+        targetItem: null,
+        status: 'active',
+        // Older queue snapshots may have the stable template only inside the
+        // persisted OptionSpec. GoalQueue.restore normalizes it to top-level
+        // ids later, but System2 restore selection runs before that normalization.
+        optionSpec: {
+          id: 'explore:surface',
+          intent: 'explore surface terrain',
+          kind: 'explore',
+          target: { count: 1 },
+          preconditions: [],
+          success: [],
+          skills: ['EXPLORE_FRONTIER'],
+          abortThreshold: 0.5,
+        },
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      })
+      const saved: GoalQueueSnapshot = {
+        counter: 5,
+        goals: [legacySurface],
+        basis,
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      }
+      const selected = selectSystem2LedgerSnapshot(
+        saved,
+        null,
+        { iron_ingot: 4, stick: 4, spruce_planks: 3, spruce_log: 1 },
+        emptyWorldMemory(),
+        { item: 'iron_pickaxe', description: 'craft 1 x iron_pickaxe', firstCan: 'CRAFT:spruce_planksx4' },
+      )
+      const queue = new GoalQueue()
+      if (selected !== null) queue.restore(selected.snapshot)
+      return (
+        selected?.reconsidered.map((goal) => goal.id).join(',') === 'g5:explore' &&
+        selected.snapshot.goals[0]?.status === 'impossible' &&
+        queue.current === null
+      )
+    })(),
+  },
+  {
     name: 'a held crafting table makes the iron-pickaxe frontier startable before restoring optional surface recovery',
     expected: true,
     observed: (() => {
