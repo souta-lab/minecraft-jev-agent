@@ -645,11 +645,12 @@ addCase('(e5) the habitat surface goal resolves to an ASCEND route or a typed SU
 // body's own) plus a `currentFootprint` headroom cut or a face's `blockedBy`
 // (an overhead obstruction exists). An island/canopy top has neither.
 
-function pocketState(y: number): WorldState {
+function pocketState(y: number, entities: WorldState['entities'] = []): WorldState {
   const base = perceive({ cobblestone: 64, iron_pickaxe: 1 }, 0)
   const feet = { x: 10, y: Math.floor(y), z: -41 }
   return {
     ...base,
+    entities,
     self: {
       ...base.self,
       position: { x: feet.x + 0.5, y, z: feet.z + 0.5 },
@@ -739,6 +740,73 @@ addCase('(f4) sealed + stranded BELOW the band: unchanged - the arm leads as bef
   return {
     pass: ascent.candidates.length > 0,
     detail: `candidates=[${ascent.candidates.map((c) => c.id).join(',')}] refusal=${ascent.refusal?.reason ?? 'none'}`,
+  }
+})
+
+addCase('(f4b) an unreachable sensed cow does not suppress the habitat clearance', () => {
+  const cow = {
+    id: 42,
+    name: 'cow',
+    kind: 'animal',
+    username: null,
+    position: { x: 22.5, y: 60.3, z: -40.5 },
+    distance: 12,
+    hostile: false,
+    lineOfSight: false,
+    heldItem: null,
+    attackedSelf: false,
+  }
+  const zombie = {
+    id: 43,
+    name: 'zombie',
+    kind: 'hostile',
+    username: null,
+    position: { x: 18.5, y: 60.3, z: -40.5 },
+    distance: 8,
+    hostile: true,
+    lineOfSight: false,
+    heldItem: null,
+    attackedSelf: false,
+  }
+  const state = pocketState(60.3, [cow, zombie])
+  const unreachableAnimalOptions = {
+    ...defaultCandidateOptions,
+    reachability: {
+      attackStandProbe: () => ({
+        stand: null,
+        standDistance: null,
+        onBody: false,
+        nearest: null,
+        refusal: 'no_standable_cell' as const,
+      }),
+    },
+  }
+  const grounded = generateGroundedCandidates(state, unreachableAnimalOptions)
+  const gap = foodSourceGap(state, unreachableAnimalOptions, grounded.candidates)
+  const animalRoute = grounded.candidates.some((candidate) => candidate.meta.foodRoute === 'animal')
+  const habitatRoute = grounded.candidates.some((candidate) => candidate.meta.foodHabitat === true)
+  const clearance = grounded.candidates.some(
+    (candidate) => candidate.kind === 'MINE' && candidate.meta.stepOverhead === true,
+  )
+  const candidateIds = grounded.candidates.map((candidate) => candidate.id)
+  const duplicateIds = candidateIds.filter((id, index) => candidateIds.indexOf(id) !== index)
+  const huntWithheld = grounded.withheld.some((entry) => entry.candidate.id === 'ATTACK:e42')
+  return {
+    pass:
+      gap?.sensedAnimal === true &&
+      gap.sensedFoodMob === true &&
+      gap.missingLink === 'no_route_to_sensed_source' &&
+      !animalRoute &&
+      huntWithheld &&
+      (habitatRoute || clearance) &&
+      grounded.foodHabitatRefusal?.reason === 'step_overhead' &&
+      duplicateIds.length === 0,
+    detail:
+      `sensedAnimal=${gap?.sensedAnimal} sensedFoodMob=${gap?.sensedFoodMob} ` +
+      `missingLink=${gap?.missingLink ?? 'none'} ` +
+      `animalRoute=${animalRoute} huntWithheld=${huntWithheld} habitatRoute=${habitatRoute} ` +
+      `clearance=${clearance} refusal=${grounded.foodHabitatRefusal?.reason ?? 'none'} ` +
+      `duplicateIds=[${duplicateIds.join(',')}] candidates=[${candidateIds.join(',')}]`,
   }
 })
 

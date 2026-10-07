@@ -4048,24 +4048,38 @@ export function generateGroundedCandidates(
   // target it could neither walk to nor dig toward.
   const digRefusals: DigRouteRefusalSink = []
   const raw = generateRawCandidates(state, options, digRefusals)
-  const grounded = applyReachabilityGate(
-    raw.candidates,
-    state,
-    options,
-    raw.placeRefusal,
-    raw.ignitionRefusal,
-    raw.entryRefusal,
-    raw.armorRefusals,
-    raw.surfaceAscentRefusal,
-    raw.foodHabitatRefusal,
-    raw.sourceExclusions,
-    raw.columnDescentRefusal,
-    raw.prospectRefusal,
-    digRefusals,
-    raw.contactRefusals,
-    raw.containerRefusals,
-    raw.armorCraftRefusals,
-  )
+  const ground = (candidates: Candidate[], foodHabitatRefusal: SurfaceAscentRefusal | null) =>
+    applyReachabilityGate(
+      candidates,
+      state,
+      options,
+      raw.placeRefusal,
+      raw.ignitionRefusal,
+      raw.entryRefusal,
+      raw.armorRefusals,
+      raw.surfaceAscentRefusal,
+      foodHabitatRefusal,
+      raw.sourceExclusions,
+      raw.columnDescentRefusal,
+      raw.prospectRefusal,
+      digRefusals,
+      raw.contactRefusals,
+      raw.containerRefusals,
+      raw.armorCraftRefusals,
+    )
+  let grounded = ground(raw.candidates, raw.foodHabitatRefusal)
+  const initialFoodGap = foodSourceGap(state, options, grounded.candidates)
+  // Entity sensing is not proof that the body can reach the producer. Only ask
+  // for the general habitat route when the ordinary candidates have gone
+  // through the same grounding gate and still provide no food route. This keeps
+  // the reachable-animal control concise while preserving ascent when a sensed
+  // animal is trapped behind a route the body cannot ground.
+  if (initialFoodGap !== null) {
+    const habitat = foodHabitatAscent(state, options)
+    if (habitat.candidates.length > 0 || habitat.refusal !== null) {
+      grounded = ground([...raw.candidates, ...habitat.candidates], habitat.refusal)
+    }
+  }
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
   // The mob-drop producer gap follows the same rule: it is derived from the same
@@ -5057,8 +5071,6 @@ function generateRawCandidates(
   // The hungry body's vertical route to where passive animals can exist. Same
   // CAN enumeration: appended alongside every other candidate, never an override
   // and never a rank.
-  const foodHabitat = foodHabitatAscent(state, options)
-
   if (strategy === 'explore_cave') {
     const explore = pickExplore(
       state,
@@ -5710,8 +5722,6 @@ function generateRawCandidates(
   }
   candidates.push(...surfaceAscent.candidates)
   candidates.push(...submersionAscent)
-  candidates.push(...foodHabitat.candidates)
-
   // A stranded body (no standable frontier beyond its own cell) has no walking
   // route at all: expose the bounded, damage-free vertical step down off its own
   // support column through the same DESCEND mechanics the goal-grounded descent
@@ -5955,7 +5965,7 @@ function generateRawCandidates(
     armorRefusals,
     armorCraftRefusals,
     surfaceAscentRefusal: surfaceAscent.refusal,
-    foodHabitatRefusal: foodHabitat.refusal,
+    foodHabitatRefusal: null,
     columnDescentRefusal: columnDescent.refusal,
     contactRefusals: contactApproach.refusals,
     digRefusals: dedupeDigRouteRefusals(digRefusals),
@@ -7352,16 +7362,14 @@ export function formatFoodHabitatRefused(refusal: SurfaceAscentRefusal): string 
 /**
  * The hungry body's vertical route to animal habitat.
  *
- * Fires only when the resident is hungry, holds no food, has NO sensed food
- * animal in range, and is BELOW the habitat band - i.e. exactly the state where
- * the hunt has no grounded route at all and would otherwise degenerate to
- * WAIT/DESCEND. At or above the band the body is already where animals can spawn,
- * so no upward route is offered (see the band check below). It reuses the SAME
- * `planVerticalApproachDetailed` machinery (and therefore
- * reuse/staircase-up/pillar) as the `surface` goal and the MOVE/RETRIEVE
- * ascents, and returns the same typed refusal when no plan exists. CAN
- * enumeration only: the route is appended alongside every other candidate and
- * never overrides or ranks one.
+ * Called by `generateGroundedCandidates` only after ordinary food candidates
+ * are grounded and no food route remains. A sensed animal is not itself a route;
+ * its contact offer may be withheld by reachability while this existing ascent
+ * is the only grounded way toward a habitat. At or above the band the body is
+ * already where animals can spawn, so no upward route is offered (see the band
+ * check below). It reuses the SAME `planVerticalApproachDetailed` machinery as
+ * the `surface` goal and MOVE/RETRIEVE ascents, and returns the same typed
+ * refusal when no plan exists. CAN enumeration only: Jev still chooses WHICH.
  */
 export function foodHabitatAscent(state: WorldState, options: CandidateOptions): SurfaceAscentResult {
   const heldFood = pickFood(state)
@@ -7374,16 +7382,12 @@ export function foodHabitatAscent(state: WorldState, options: CandidateOptions):
   // run on 3570c79): a hungry body IN THE NETHER climbed to y102 chasing this
   // band while no passive animal can exist there - the futile half of the same
   // class the level scan and contact-ascent work fixed for real targets. The food
-  // gap itself stays typed: `FOOD_SOURCE_NONE` still reports sensedAnimal=false.
+  // gap remains typed: sensing a producer and grounding a route to it are
+  // separate facts.
   const habitatDimension = (state.self.dimension ?? '').replace(/^minecraft:/, '')
   if (habitatDimension.length > 0 && habitatDimension !== 'overworld') {
     return { candidates: [], refusal: null }
   }
-  const foodHuntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
-  const animalSensed = state.entities.some(
-    (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
-  )
-  if (animalSensed) return { candidates: [], refusal: null }
   // The arm's ONLY grounded premise is Minecraft spawn truth: passive animals
   // need grass with sky access, and in the 1.18+ overworld that surface does not
   // exist below sea level. A body already AT or ABOVE the band is standing in the

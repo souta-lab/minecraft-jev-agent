@@ -470,7 +470,8 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
     typed,
     refusal === null ? 'refusal=null' : `"${formatFoodHabitatRefused(refusal)}"`,
   )
-  // A sensed food animal disarms the habitat ascent: the hunt has a real route.
+  // A grounded contact route makes the habitat ascent redundant. Merely
+  // sensing an animal is not the proof; this nearby cow is actually offered.
   const cow: EntityState = {
     id: 7,
     name: 'cow',
@@ -483,11 +484,13 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
     heldItem: null,
     attackedSelf: false,
   }
-  const withAnimal = foodHabitatAscent(hungryUndergroundWorld({ dirt: 1 }, [cow]), defaultCandidateOptions)
+  const withAnimal = generateGroundedCandidates(hungryUndergroundWorld({ dirt: 1 }, [cow]), defaultCandidateOptions)
+  const animalRoute = withAnimal.candidates.some((candidate) => candidate.meta.foodRoute === 'animal')
+  const habitatRoute = withAnimal.candidates.some((candidate) => candidate.meta.foodHabitat === true)
   check(
-    '(e) a sensed food animal disarms the habitat ascent',
-    withAnimal.candidates.length === 0 && withAnimal.refusal === null,
-    `candidates=${withAnimal.candidates.length}`,
+    '(e) a grounded animal route keeps the redundant habitat ascent out of the offer',
+    animalRoute && !habitatRoute,
+    `animalRoute=${animalRoute} habitatRoute=${habitatRoute}`,
   )
 }
 
