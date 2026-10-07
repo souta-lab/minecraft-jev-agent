@@ -1637,7 +1637,27 @@ export class GoalQueue {
           ? {}
           : { prerequisiteCausalOwnerIds: [...goal.prerequisiteCausalOwnerIds] }),
       }
-      const spec = copy.optionSpec ?? compilePlannedGoal(queuedToPlanned(copy as QueuedGoal))
+      let spec = copy.optionSpec ?? compilePlannedGoal(queuedToPlanned(copy as QueuedGoal))
+      // Legacy System2 explore rows lost mode from their intent, while their
+      // typed template retained it. Repair that exact loss only when every
+      // persisted template agrees; retain custom prose and all predicates.
+      const templates = new Set(
+        [copy.semanticOptionTemplateId, copy.optionTemplateId, spec.semanticOptionTemplateId, spec.id]
+          .filter((id): id is string => typeof id === 'string' && id.length > 0),
+      )
+      const template = templates.size === 1 ? [...templates][0] : undefined
+      if (
+        copy.kind === 'explore' && copy.description === 'explore' && spec.intent === 'explore' &&
+        (copy.semanticOptionIntent === undefined || copy.semanticOptionIntent === 'explore') &&
+        (spec.semanticOptionIntent === undefined || spec.semanticOptionIntent === 'explore') &&
+        (template === 'explore:surface' || template === 'explore:cave')
+      ) {
+        const intent = `explore ${template.slice('explore:'.length)} terrain`
+        copy.description = intent
+        copy.semanticOptionIntent = intent
+        copy.detail = `${copy.detail ?? ''} EXPLORE_MODE_RESTORED template=${template}`.trim()
+        spec = { ...spec, intent, semanticOptionIntent: intent }
+      }
       copy.optionSpec = spec
       copy.optionTemplateId = copy.optionTemplateId ?? spec.id
       copy.optionInstanceId = copy.optionInstanceId ?? stableOptionInstanceId(spec)

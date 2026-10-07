@@ -223,6 +223,13 @@ export function buildSemanticProjection(host: System2PlaneHost,
   mergedCandidates: number,
 ): JevSemanticProjection {
   const option = state.currentOption ?? null
+  const current = state.goalQueue.current
+  // syncGoalToQueue intentionally leaves item-less Options without an
+  // inventory GoalState. That compatibility goal may describe another WHAT;
+  // never project its resource/count/progress as the active Option's facts.
+  const nonItemGoal = current !== null && current.targetItem === null && host.goal.id !== current.id
+    ? current
+    : null
   const optionId = optionIdForGoal(state.goalQueue.current) ?? option?.instanceId ?? null
   const threat = host.signals.threat ?? null
   const critical = host.signals.criticalDamage ?? null
@@ -247,13 +254,21 @@ export function buildSemanticProjection(host: System2PlaneHost,
     },
   }
   const base = buildJevSemanticProjection({
-    goal: {
+    goal: nonItemGoal === null ? {
       key: host.currentGoalKey(),
       targetItem: host.goal.targetItem ?? null,
       have: host.goal.haveCount,
       required: host.goal.requiredCount,
       complete: host.goal.complete === true,
       progress: host.goal.progress,
+    } : {
+      key: host.currentGoalKey(),
+      targetItem: null,
+      have: nonItemGoal.haveCount,
+      required: nonItemGoal.requiredCount,
+      // The unrelated inventory goal supplies no predicate completion proof.
+      complete: false,
+      progress: 0,
     },
     option: {
       instanceId: optionId,

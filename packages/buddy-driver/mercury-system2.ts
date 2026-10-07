@@ -725,7 +725,11 @@ function semanticizeMercuryGoal(source: MercuryPlanGoalJson, compiled: PlannedGo
   const semanticSpec = {
     ...compilePlannedGoal(compiled),
     id: templateId,
-    intent: source.kind === undefined ? compiled.description : `${source.kind}${item === null ? '' : ` ${item}`}`,
+    // Explore's mode is part of the selected WHAT, not an item. Preserve it
+    // when the Option is later lowered back to the executable queue row.
+    intent: source.kind === undefined || source.kind === 'explore'
+      ? compiled.description
+      : `${source.kind}${item === null ? '' : ` ${item}`}`,
   }
   const semanticInstanceId = stableOptionInstanceId(semanticSpec)
   semanticSpec.semanticOptionTemplateId = semanticSpec.id
