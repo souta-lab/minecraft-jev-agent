@@ -137,9 +137,9 @@ export interface WalkSkillBudget {
 }
 
 /**
- * The loop's budget. The commitment's declared `budget.ms` (the same
- * `pathTimeoutMs` every walk was already charged) is the semantic bound; the
- * module cap bounds an absent/unbounded declaration.
+ * The loop's budget. The commitment declares its locomotion time plus any
+ * named staircase clearance time at claim; the loop never extends it. The
+ * module cap bounds the complete declaration, including absent/unbounded ones.
  */
 export function walkSkillBudget(declaredMs: number | null, stepCap: number = WALK_SKILL_STEP_CAP): WalkSkillBudget {
   const ms =

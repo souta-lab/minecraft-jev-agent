@@ -2818,8 +2818,24 @@ export class Executor {
         return digActionBudgetMs(declaredDigCells(candidate).length, this.options.digTimeoutMs)
       case 'MOVE':
       case 'RETREAT':
-      case 'RETRIEVE':
-        return this.options.pathTimeoutMs
+      case 'RETRIEVE': {
+        // A selected staircase owns both its named clearance and its walk.
+        // Charging only pathTimeoutMs truncated a 15s hand-clearance dig before
+        // the body could occupy the step. Reserve the declared dig cells at
+        // claim time; the existing walk cap and effect envelope still bound it.
+        const digs = new Set<string>()
+        for (const fallback of [false, true]) {
+          const vertical = readMetaString(candidate, fallback ? 'fallbackVertical' : 'vertical')
+          if (vertical !== 'staircase' && vertical !== 'staircase-up') continue
+          const base = this.verticalKeyBase(vertical, fallback)!
+          const dig = readMetaPoint(candidate, `${base}DigX`, `${base}DigY`, `${base}DigZ`)
+          if (dig !== null) digs.add(`${dig.x},${dig.y},${dig.z}`)
+        }
+        if (digs.size === 0) return this.options.pathTimeoutMs
+        return walkSkillBudget(
+          this.options.pathTimeoutMs + digActionBudgetMs(digs.size, this.options.digTimeoutMs),
+        ).ms
+      }
       case 'SMELT':
         return this.options.smeltTimeoutMs
       case 'CONTAINER':

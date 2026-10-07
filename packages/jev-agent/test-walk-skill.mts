@@ -493,6 +493,7 @@ function retrieveCandidate(target: Vec3Json): Candidate {
 
 interface WalkRun {
   result: ExecutionResult
+  commitmentBudgetMs: number | null
   selectedBy: string | null
   position: Vec3
   trace: string[]
@@ -530,6 +531,8 @@ interface RunOptions {
   maxStepsPerWaypoint?: number
   packetStepMs?: number
   pathTimeoutMs?: number
+  digTimeoutMs?: number
+  digDelayMs?: number
   claimContext?: Parameters<Executor['claim']>[1]
   pathfinderPhysics?: boolean
   vtrPathSegmentation?: boolean
@@ -545,6 +548,20 @@ async function runWalk(
 ): Promise<WalkRun> {
   const dir = mkdtempSync(join(tmpdir(), 'walk-skill-'))
   const fixture = makeBot(feet, grid, options.hook, options.pathfinderPhysics === true)
+  if (options.digDelayMs !== undefined) {
+    const originalDig = fixture.bot.dig.bind(fixture.bot)
+    fixture.bot.digTime = () => options.digDelayMs!
+    fixture.bot.dig = async (
+      block: Parameters<Bot['dig']>[0],
+      forceLook?: Parameters<Bot['dig']>[1],
+      digFace?: Parameters<Bot['dig']>[2],
+    ) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, options.digDelayMs))
+      return digFace === undefined
+        ? originalDig(block, forceLook)
+        : originalDig(block, forceLook ?? false, digFace)
+    }
+  }
   const logger = new EventLogger(new JsonlWriter(join(dir, 'agent.jsonl')), false)
   const executor = new Executor(fixture.bot, logger, {
     ...defaultExecutorOptions,
@@ -552,6 +569,7 @@ async function runWalk(
     packetStepMs: options.packetStepMs ?? 1,
     maxStepsPerWaypoint: options.maxStepsPerWaypoint ?? defaultExecutorOptions.maxStepsPerWaypoint,
     pathTimeoutMs: options.pathTimeoutMs ?? defaultExecutorOptions.pathTimeoutMs,
+    digTimeoutMs: options.digTimeoutMs ?? defaultExecutorOptions.digTimeoutMs,
   })
   fixture.executorRef.current = executor
   const startedAt = Date.now()
@@ -615,6 +633,7 @@ async function runWalk(
       }
   const claim = executor.claim(candidate, claimContext)
   const selectedBy = executor.current?.commitment?.selectedBy ?? null
+  const commitmentBudgetMs = executor.current?.commitment?.budget.ms ?? null
   const result = await claim.completion
   const elapsedMs = Date.now() - startedAt
   const rows = (await Bun.file(join(dir, 'agent.jsonl')).text())
@@ -629,6 +648,7 @@ async function runWalk(
     .map(({ message, detail }) => ({ message: message ?? '', detail: detail ?? {} }))
   return {
     result,
+    commitmentBudgetMs,
     selectedBy,
     position: fixture.position,
     trace: fixture.trace,
@@ -1149,6 +1169,47 @@ const cell = (p: Vec3Json): string => `${Math.floor(p.x)},${Math.floor(p.y)},${M
     '(vii) the interrupted walk emitted a typed interrupt/end and no boundary it did not reach',
     run.ends.length === 1 && run.boundaries.length === 0,
     `end=${run.ends[0] ?? 'none'} boundaries=${run.boundaries.length}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// A named staircase dig needs its own time before walking can begin. Measured
+// p27: hand-clearance deepslate takes 15s but the complete ASCEND was also 15s.
+// Scale the same geometry/timing relation; use the stock planner and existing
+// control-state physics, never an invented arrival or a changed target.
+{
+  const grid: Grid = new Map()
+  fill(grid, 0, 8, 63, 63, -1, 1, 'stone')
+  fill(grid, 0, 8, 64, 69, -1, 1, 'air')
+  fill(grid, 5, 5, 64, 65, 0, 0, 'deepslate')
+  const start = { x: 4.5, y: 64, z: 0.5 }
+  const target = { x: 5, y: 65, z: 0 }
+  const candidate = moveCandidate(target)
+  candidate.meta = {
+    vertical: 'staircase-up', upDir: 'E', upFromY: 64, upToY: 65,
+    upDigX: 5, upDigY: 65, upDigZ: 0,
+    upStepX: 5, upStepY: 65, upStepZ: 0,
+  }
+  const run = await runWalk(start, grid, candidate, {
+    actuation: 'pathfinder', pathfinderPhysics: true,
+    pathTimeoutMs: 1_000, digTimeoutMs: 1_500, digDelayMs: 1_100,
+  })
+  check(
+    '(route budget) one staircase commitment reserves clearance plus locomotion time',
+    run.commitmentBudgetMs === 2_500 && run.starts.length === 1,
+    `budget=${run.commitmentBudgetMs}ms starts=${run.starts.length}`,
+  )
+  check(
+    '(route budget) slow declared clearance then actual step occupancy verify under one selection',
+    run.result.status === 'done' && run.result.verified &&
+      cell(run.position) === cell(target) && at(grid, 5, 65, 0).boundingBox === 'empty',
+    `status=${run.result.status} failure=${run.result.failure} position=${cell(run.position)} ` +
+      `target=${cell(target)} elapsed=${run.elapsedMs}ms ends=${run.ends.join(';')}`,
+  )
+  check(
+    '(route budget) ordinary walk time remains its original declaration',
+    (await runWalk(target, grid, moveCandidate(target), { pathTimeoutMs: 1_000 })).commitmentBudgetMs === 1_000,
+    'no staircase dig declaration -> no additional dig allowance',
   )
 }
 
