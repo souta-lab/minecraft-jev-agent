@@ -2782,6 +2782,26 @@ export class JevController {
         this.summonLlm('queue_empty', 'goal queue is empty; no long-horizon goal to consume')
       }
 
+      if (
+        system2plane.shouldHoldDecisionForQueueEmptyPlan(
+          this.queue.isEmpty,
+          this.llmInFlight,
+          reflex !== null,
+        )
+      ) {
+        this.logger.info(
+          'system2',
+          'SYSTEM2_QUEUE_EMPTY_DECISION_HELD reason=fresh_what_pending',
+          {
+            trigger,
+            requestId: this.tickResummonLog.at(-1)?.requestId ?? null,
+            objective: this.objectiveState(),
+          },
+          this.tickCounter,
+        )
+        return
+      }
+
       const decision =
         reflex === null
           ? await this.decide(state, candidates, trigger, causalStamp.chainId)

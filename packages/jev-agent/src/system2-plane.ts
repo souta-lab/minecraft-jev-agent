@@ -458,6 +458,22 @@ export function semanticStateFingerprint(host: System2PlaneHost): string {
 
 
 /**
+ * An empty queue has no current WHAT for the Typed Decision Plane to realize.
+ * While the queue-empty System2 request is pending, hold ordinary tactical
+ * dispatch so a stale parent objective cannot mutate the basis and discard the
+ * fresh plan. The controller evaluates the unique hard-safety reflex first and
+ * passes it through this boundary unchanged.
+ */
+export function shouldHoldDecisionForQueueEmptyPlan(
+  queueEmpty: boolean,
+  planInFlight: boolean,
+  uniqueSafetyReflex: boolean,
+): boolean {
+  return queueEmpty && planInFlight && !uniqueSafetyReflex
+}
+
+
+/**
  * Bounded hold a fresh plan gets while a body-owned action is still in flight.
  * Sized to outlast a mechanical action's own bound (walk_to msBudget=15s, dig
  * legs several seconds each) plus settle margin: 20 x 1.5s ~= 30s. Measured
