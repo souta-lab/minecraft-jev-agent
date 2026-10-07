@@ -268,12 +268,11 @@ const cases: Case[] = [
         planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
       }
       const counts = {
-        raw_iron: 16,
         iron_ingot: 4,
         stick: 4,
         spruce_planks: 3,
         crafting_table: 1,
-        coal: 8,
+        coal: 7,
         cobblestone: 112,
         furnace: 1,
       }
