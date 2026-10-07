@@ -7,6 +7,7 @@ import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { GoalKind, GoalQueueSnapshot, GoalStatus, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import {
   evaluateLedgerRestoreBasis,
+  evaluateSystem2LedgerRestoreBasis,
   ledgerBasisForLiveFrontier,
   ledgerIsConsistent,
   selectLedgerSnapshot,
@@ -198,6 +199,56 @@ const cases: Case[] = [
       frontierRungId: 'nether_portal',
       frontierRungIndex: 12,
     }).accept,
+  },
+  {
+    name: 'model-authored surface recovery is reconsidered when its saved mandatory frontier is stale',
+    expected: true,
+    observed: (() => {
+      const liveBasis: LedgerBasis = {
+        worldKey: '127.0.0.1:26615|minecraft:overworld|1',
+        frontierRungId: 'iron_pickaxe',
+        frontierRungIndex: 9,
+      }
+      const stale: GoalQueueSnapshot = {
+        counter: 5,
+        goals: [queued({
+          id: 'g5:explore',
+          kind: 'explore',
+          description: 'explore surface terrain',
+          targetItem: null,
+          status: 'active',
+          optionInstanceId: 'explore:surface',
+          optionTemplateId: 'explore:surface',
+          planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+        })],
+        basis: {
+          worldKey: liveBasis.worldKey,
+          frontierRungId: 'wood',
+          frontierRungIndex: 0,
+        },
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      }
+      const counts = { iron_ingot: 4, stick: 4, spruce_planks: 3, spruce_log: 1 }
+      const selected = selectSystem2LedgerSnapshot(
+        stale,
+        null,
+        counts,
+        emptyWorldMemory(),
+        { item: 'iron_pickaxe', description: 'craft 1 x iron_pickaxe', firstCan: 'CRAFT:spruce_planksx4' },
+      )
+      const decision = selected === null
+        ? { accept: false, reasons: ['snapshot_unavailable'] }
+        : evaluateSystem2LedgerRestoreBasis(selected.snapshot, liveBasis)
+      const restored = new GoalQueue()
+      if (decision.accept && selected !== null) restored.restore(selected.snapshot)
+      return (
+        selected?.reconsidered.map((goal) => goal.id).join(',') === 'g5:explore' &&
+        decision.accept === false &&
+        decision.reasons.includes('frontier_index_changed') &&
+        decision.reasons.includes('frontier_id_changed') &&
+        restored.current === null
+      )
+    })(),
   },
   {
     name: 'done-only Nether snapshot cannot erase the fresh Overworld respawn queue',

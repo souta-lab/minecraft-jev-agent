@@ -1665,9 +1665,10 @@ export function evaluateLedgerRestoreBasis(
 }
 
 /**
- * Model-authority queue restore is scoped to the world and semantic mission.
- * The ladder frontier remains evidence, but moving it cannot authorize or reject
- * a System2 plan because it does not define the plan's WHAT.
+ * A model-authored queue is still grounded in the live world and frontier from
+ * which System2 produced it. If either changes, discard the durable queue and
+ * ask System2 to reconsider from current facts. This is an invalidation boundary,
+ * not code choosing a replacement WHAT; the model remains the mission authority.
  */
 export function evaluateSystem2LedgerRestoreBasis(
   snapshot: GoalQueueSnapshot,
@@ -1677,6 +1678,8 @@ export function evaluateSystem2LedgerRestoreBasis(
   if (basis === undefined) return { accept: false, reasons: ['missing_world_basis'] }
   const reasons: string[] = []
   if (basis.worldKey !== live.worldKey) reasons.push('world_key_changed')
+  if (basis.frontierRungIndex !== live.frontierRungIndex) reasons.push('frontier_index_changed')
+  if (basis.frontierRungId !== live.frontierRungId) reasons.push('frontier_id_changed')
   if (!isSystem2MissionPlanIdentity(snapshot.planIdentity)) reasons.push('mission_identity_mismatch')
   return { accept: reasons.length === 0, reasons }
 }

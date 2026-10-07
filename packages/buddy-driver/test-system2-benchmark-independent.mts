@@ -147,10 +147,11 @@ assert.deepEqual(
   'a non-M3 active queue objective must be projected from the queue, not the compatibility root goal',
 )
 
+const modelBasis = { worldKey: 'server|minecraft:overworld|1', frontierRungId: 'blaze_rods', frontierRungIndex: 15 }
 const modelLedger: GoalQueueSnapshot = {
   counter: 1,
   goals: [],
-  basis: { worldKey: 'server|minecraft:overworld|1', frontierRungId: 'blaze_rods', frontierRungIndex: 15 },
+  basis: modelBasis,
   planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
 }
 const changedFrontier = {
@@ -158,11 +159,15 @@ const changedFrontier = {
   frontierRungId: 'wood',
   frontierRungIndex: 0,
 }
-assert.deepEqual(evaluateSystem2LedgerRestoreBasis(modelLedger, changedFrontier), { accept: true, reasons: [] })
+assert.deepEqual(evaluateSystem2LedgerRestoreBasis(modelLedger, modelBasis), { accept: true, reasons: [] })
+assert.deepEqual(evaluateSystem2LedgerRestoreBasis(modelLedger, changedFrontier), {
+  accept: false,
+  reasons: ['frontier_index_changed', 'frontier_id_changed'],
+})
 assert.equal(
   selectSystem2LedgerSnapshot(modelLedger, null, {}, world)?.source,
   'host-snapshot',
-  'same-world model intent restores independently of benchmark frontier changes',
+  'same-world model intent remains selectable; the live basis gate decides whether it is still current',
 )
 const legacyRungLedger: GoalQueueSnapshot = {
   ...modelLedger,
@@ -170,7 +175,7 @@ const legacyRungLedger: GoalQueueSnapshot = {
 }
 assert.deepEqual(evaluateSystem2LedgerRestoreBasis(legacyRungLedger, changedFrontier), {
   accept: false,
-  reasons: ['mission_identity_mismatch'],
+  reasons: ['frontier_index_changed', 'frontier_id_changed', 'mission_identity_mismatch'],
 })
 assert.equal(
   selectSystem2LedgerSnapshot(legacyRungLedger, null, {}, world),
@@ -201,7 +206,7 @@ assert.equal(
 )
 assert.deepEqual(
   evaluateSystem2LedgerRestoreBasis(modelLedger, { ...changedFrontier, worldKey: 'another-world' }),
-  { accept: false, reasons: ['world_key_changed'] },
+  { accept: false, reasons: ['world_key_changed', 'frontier_index_changed', 'frontier_id_changed'] },
 )
 
 console.log('system2-benchmark-independent: PASS (mission plus live alternatives; no rung menu or ordering prescription)')
