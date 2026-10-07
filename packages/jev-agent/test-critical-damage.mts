@@ -566,6 +566,74 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
   )
 }
 
+// p27.36: the exact step-overhead MINE is the first leg of the grounded food
+// habitat route. Losing caller metadata here makes starvation-only filtering
+// erase the only route and leave an unrelated explore MOVE selectable.
+{
+  const state = hungryUndergroundWorld({ cobblestone: 64, iron_pickaxe: 1 })
+  const queued: QueuedGoal = {
+    ...queuedFood(),
+    id: 'g9:explore',
+    kind: 'explore',
+    description: 'explore cave terrain',
+    targetItem: 'explore',
+    requiredCount: 1,
+    optionInstanceId: 'explore:cave',
+    optionTemplateId: 'explore:cave',
+  }
+  state.goal = {
+    ...foodGoal(),
+    id: 'g9:explore',
+    description: 'explore cave terrain',
+    targetItem: 'explore',
+    requiredCount: 1,
+  }
+  state.goalQueue = queueWith(queued)
+  state.stepCuts = [
+    {
+      dir: 'E',
+      dx: 1,
+      dz: 0,
+      cut: { x: 24, y: 54, z: 9 },
+      step: { x: 24, y: 54, z: 9 },
+      name: 'stone',
+      safe: false,
+      reason: 'no headroom above the new step',
+      blockedBy: { pos: { x: 24, y: 55, z: 9 }, name: 'stone' },
+    },
+  ]
+  const ascent = foodHabitatAscent(state, defaultCandidateOptions)
+  const clearance = ascent.candidates.find((candidate) => candidate.id === 'MINE:b24_55_9')
+  const genericExplore: Candidate = {
+    id: 'MOVE:generic-search',
+    kind: 'MOVE',
+    label: 'continue unrelated cave exploration',
+    target: { x: 22, y: 53, z: 9 },
+    targetName: null,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    toolTier: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: state.tick, explore: true },
+  } as unknown as Candidate
+  const starvingOffer = clearance === undefined
+    ? []
+    : restrictCandidatesDuringCriticalDamage(state, [clearance, genericExplore])
+  check(
+    '(e3) p27.36 step-overhead clearance keeps food-habitat identity through starvation filtering under a stale cave-explore head',
+    ascent.refusal?.reason === 'step_overhead' &&
+      clearance?.target?.x === 24 && clearance.target.y === 55 && clearance.target.z === 9 &&
+      clearance.meta.clearance === true && clearance.meta.stepOverhead === true &&
+      clearance.meta.foodHabitat === true && clearance.meta.foodHabitatGoalId === 'g9:explore' &&
+      clearance.meta.ascentTargetY === ANIMAL_HABITAT_SEA_LEVEL &&
+      starvingOffer.length === 1 && starvingOffer[0]?.id === clearance.id,
+    `refusal=${ascent.refusal?.reason ?? 'none'} clearance=${clearance?.id ?? 'none'} foodHabitat=${String(clearance?.meta.foodHabitat)} goal=${String(clearance?.meta.foodHabitatGoalId)} offer=[${starvingOffer.map((candidate) => candidate.id).join(' ')}]`,
+  )
+}
+
 // ---------------------------------------------------------------------------
 // (f) the CAN layer refuses work a starving body cannot finish, but keeps food
 // ---------------------------------------------------------------------------

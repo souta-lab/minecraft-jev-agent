@@ -7497,6 +7497,10 @@ function ascentRouteTo(
     const overhead =
       refusal.reason === 'step_overhead' && refusal.blocker !== undefined
         ? stepOverheadCandidates(state, options, { kind: 'headroom', cell: refusal.blocker })
+            .map((candidate) => ({
+              ...candidate,
+              meta: { ...candidate.meta, ...spec.extraMeta, ascentTargetY: spec.targetY },
+            }))
         : []
     return {
       candidates: overhead,

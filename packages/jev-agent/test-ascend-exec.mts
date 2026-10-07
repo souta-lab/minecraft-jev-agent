@@ -181,7 +181,7 @@ function liveWorld(counts: Record<string, number>): WorldState {
 }
 
 function ascentOf(candidates: readonly Candidate[]): Candidate | null {
-  return candidates.find((candidate) => candidate.meta.surfaceAscent === true) ?? null
+  return candidates.find((candidate) => candidate.kind === 'MOVE' && candidate.meta.surfaceAscent === true) ?? null
 }
 
 /** Exactly the context the controller builds at commit time (controller.ts). */
