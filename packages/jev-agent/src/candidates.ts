@@ -570,6 +570,11 @@ export function isSurvivalAnswerCandidate(candidate: Candidate): boolean {
     candidate.meta.attackRaceLost !== true &&
     (candidate.kind !== 'ATTACK' || attackRespondsToThreatOrNeed(candidate)) &&
     (CONTACT_THREAT_KINDS.has(candidate.kind) ||
+    // A contact ascent or its exact clearance MINE can be the first mechanical
+    // leg of the same grounded food route as the final ATTACK. Preserve that
+    // typed route through the threat offer so starvation does not erase its
+    // only way to reach the sensed producer.
+    (typeof candidate.meta.foodRoute === 'string' && typeof candidate.meta.foodTarget === 'string') ||
     isDeathZoneEscapeRoute(candidate) ||
     // §4.1 world-shaping survival answers: `MOVE:escapeup:*` (a MOVE carrying
     // its own grounded pillar route) and `PLACE:wall:*` (a placement into the
@@ -5401,7 +5406,12 @@ function generateRawCandidates(
   // fight; Jev chooses. When no route exists the arm returns a typed refusal (see
   // `contactRefusals`), which is what lets the gate withhold the ATTACK BY CAN
   // instead of leasing a target the body provably cannot bring melee onto.
-  const contactApproach = contactApproachCandidates(state, options, attackTargets)
+  const contactApproach = contactApproachCandidates(
+    state,
+    options,
+    attackTargets,
+    new Set(huntTargets.map((target) => target.id)),
+  )
   candidates.push(...contactApproach.candidates)
 
   const foodName = heldFood
@@ -12239,7 +12249,8 @@ export interface ContactApproachResult {
 function contactApproachCandidates(
   state: WorldState,
   options: CandidateOptions,
-  targets: readonly { id: number; name: string; position: Vec3Json; distance: number }[],
+  targets: readonly { id: number; name: string; position: Vec3Json; distance: number; hostile?: boolean }[],
+  foodHuntTargetIds: ReadonlySet<number>,
 ): ContactApproachResult {
   const candidates: Candidate[] = []
   const refusals: ContactRefusal[] = []
@@ -12266,7 +12277,12 @@ function contactApproachCandidates(
       approach: geometry.approach,
       placeable: geometry.placeable,
     }
-    if (geometry.approach === 'no_grounded_remedy') {
+    // `step_overhead` is a typed refusal for the vertical plan, but its binding
+    // cell is already a grounded clearance action. Let the shared ascent arm
+    // emit that exact MINE before declaring the contact route unavailable.
+    const clearanceRouteAvailable =
+      geometry.approach === 'no_grounded_remedy' && geometry.ascentRefusal === 'step_overhead'
+    if (geometry.approach === 'no_grounded_remedy' && !clearanceRouteAvailable) {
       if (refusedLevels.has(geometry.targetY)) continue
       refusedLevels.add(geometry.targetY)
       refusals.push(base)
@@ -12295,7 +12311,21 @@ function contactApproachCandidates(
       continue
     }
     offeredLevels.add(geometry.targetY)
-    candidates.push(...ascent.candidates)
+    const foodRouteMeta: Record<string, string> = foodHuntTargetIds.has(entity.id)
+      ? { foodRoute: entity.hostile === true ? 'mob_drop' : 'animal', foodTarget: entity.name }
+      : {}
+    candidates.push(...ascent.candidates.map((candidate) => ({
+      ...candidate,
+      meta: {
+        ...candidate.meta,
+        contactAscent: true,
+        contactEntityId: entity.id,
+        contactTargetName: entity.name,
+        contactGapY: geometry.gapY,
+        contactApproach: geometry.approach,
+        ...foodRouteMeta,
+      },
+    })))
   }
   return { candidates, refusals }
 }

@@ -35,7 +35,12 @@ import { Executor, defaultExecutorOptions, formatHuntEnd } from './src/executor.
 import { EventLogger } from './src/jev.ts'
 import type { AgentLevel } from './src/jev/client.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
-import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
+import {
+  defaultCandidateOptions,
+  generateGroundedCandidates,
+  isSurvivalAnswerCandidate,
+  restrictCandidatesDuringCriticalDamage,
+} from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
 import {
   classifyCombatOutcome,
@@ -412,6 +417,79 @@ const FLAT = { x: 2.5, y: 60, z: 0.5 }
     '(i2) at the target level the ATTACK is offered and the lease lands its swings (killed)',
     `offered=${offered?.id ?? 'none'} status=${result.status} outcome=${String(result.combatOutcome)} swings=${fixture.attacks()} ` +
       `huntEnd=${fixture.logger.containing('HUNT_END').join(' | ') || 'none'}`,
+  )
+}
+
+{
+  // A starving body below a sensed chicken has the same step_overhead shape as
+  // the live portal-p27 refusal. The shared ascent arm must offer the exact
+  // named clearance dig, and keep the later contact MOVE in the same food route.
+  const chicken = {
+    id: 101,
+    name: 'chicken',
+    kind: 'passive',
+    username: null,
+    position: { x: 4.5, y: 66, z: 0.5 },
+    distance: Math.hypot(4, 6),
+    hostile: false,
+    lineOfSight: true,
+  }
+  const starving = world({ body: BODY, entities: [chicken], carried: { iron_pickaxe: 1, cobblestone: 64 } })
+  starving.self.health = 1
+  starving.self.food = 0
+  starving.self.dimension = 'minecraft:overworld'
+  starving.stepCuts = [
+    {
+      dir: 'E',
+      dx: 1,
+      dz: 0,
+      cut: { x: 1, y: 61, z: 0 },
+      step: { x: 1, y: 61, z: 0 },
+      name: 'stone',
+      safe: false,
+      reason: 'step destination lacks overhead clearance',
+      blockedBy: { pos: { x: 1, y: 62, z: 0 }, name: 'stone' },
+    },
+  ]
+
+  const blocked = generateGroundedCandidates(starving, optionsWithProbe('reachable'))
+  const attackWithheld = blocked.withheld.find((entry) => entry.candidate.id === 'ATTACK:e101')
+  const overheadMine = blocked.candidates.find(
+    (candidate) => candidate.id === 'MINE:b1_62_0' && candidate.meta.stepOverhead === true,
+  )
+  const starvingOffer = overheadMine === undefined
+    ? []
+    : restrictCandidatesDuringCriticalDamage(starving, [overheadMine])
+
+  const cleared = structuredClone(starving)
+  cleared.stepCuts = [{ ...cleared.stepCuts![0]!, safe: true, reason: 'safe', blockedBy: null }]
+  const afterClear = generateGroundedCandidates(cleared, optionsWithProbe('reachable'))
+  const contactMove = afterClear.candidates.find(
+    (candidate) => candidate.kind === 'MOVE' && candidate.meta.contactAscent === true,
+  )
+  const starvingMoveOffer = contactMove === undefined
+    ? []
+    : restrictCandidatesDuringCriticalDamage(cleared, [contactMove])
+  const pass =
+    attackWithheld?.result.reason === 'needs_ascend' &&
+    attackWithheld.candidate.meta.foodRoute === 'animal' &&
+    overheadMine?.target?.x === 1 && overheadMine.target.y === 62 && overheadMine.target.z === 0 &&
+    overheadMine.meta.foodRoute === 'animal' && overheadMine.meta.foodTarget === 'chicken' &&
+    blocked.contactRefusals.length === 0 &&
+    starvingOffer.some((candidate) => candidate.id === overheadMine?.id) &&
+    isSurvivalAnswerCandidate(overheadMine as Candidate) &&
+    contactMove !== undefined &&
+    contactMove.meta.foodRoute === 'animal' &&
+    contactMove.meta.foodTarget === 'chicken' &&
+    starvingMoveOffer.some((candidate) => candidate.id === contactMove?.id) &&
+    isSurvivalAnswerCandidate(contactMove) &&
+    afterClear.withheld.some((entry) => entry.candidate.id === 'ATTACK:e101')
+  report(
+    pass,
+    'a food contact step_overhead exposes its exact clearance MINE and keeps the re-planned ascent tagged as food',
+    `attack=${attackWithheld?.result.reason ?? 'offered'} mine=${overheadMine?.id ?? 'none'} ` +
+      `mineRoute=${String(overheadMine?.meta.foodRoute)} contactMove=${contactMove?.id ?? 'none'} ` +
+      `moveRoute=${String(contactMove?.meta.foodRoute)} refusals=${blocked.contactRefusals.length}`,
   )
 }
 
