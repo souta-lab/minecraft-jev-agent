@@ -7085,17 +7085,41 @@ export interface SurfaceAscentResult {
  */
 export function surfaceAscentCandidates(state: WorldState, options: CandidateOptions): SurfaceAscentResult {
   const current = state.goalQueue?.current ?? null
-  if (current?.kind !== 'surface') return { candidates: [], refusal: null }
+  const searchTargetY = surfaceExploreAccessTargetY(state)
+  if (current?.kind !== 'surface' && searchTargetY === null) return { candidates: [], refusal: null }
   const targetY =
-    typeof current.targetY === 'number' && Number.isFinite(current.targetY) ? current.targetY : null
-  if (targetY === null) return { candidates: [], refusal: null }
-  return ascentRouteTo(state, options, {
+    searchTargetY ?? (typeof current?.targetY === 'number' && Number.isFinite(current.targetY) ? current.targetY : null)
+  if (targetY === null || current === null) return { candidates: [], refusal: null }
+  const result = ascentRouteTo(state, options, {
     targetY,
     goalId: current.id,
     idPrefix: 'ASCEND:surface:',
     label: 'ascend toward the surface',
     extraMeta: { surfaceAscent: true, surfaceGoalId: current.id },
   })
+  if (searchTargetY === null) return result
+  // This is an execution prerequisite of System2's existing surface search,
+  // including the sensor-named headroom cut when ascent is not yet possible.
+  // It does not replace the Option or assert that reaching this band is SUCCESS.
+  return {
+    ...result,
+    candidates: result.candidates.map(candidate => ({
+      ...candidate,
+      meta: { ...candidate.meta, optionSkill: 'PREREQUISITE', prerequisiteRole: 'surface_access',
+        purpose: 'search:explore:surface', ascentTargetY: searchTargetY },
+    })),
+  }
+}
+
+/** The existing Overworld surface-search band is a reachability prerequisite,
+ * never a completion predicate. Only the explicit typed mode can use it;
+ * remembered distant stations cannot raise the body's own-column target. */
+function surfaceExploreAccessTargetY(state: WorldState): number | null {
+  const current = state.goalQueue?.current ?? null
+  if (current?.kind !== 'explore' || !optionIsSurfaceDirected(current, null)) return null
+  if ((state.self.dimension ?? '').replace(/^minecraft:/, '') !== 'overworld') return null
+  if (Math.floor(state.self.position.y) >= ANIMAL_HABITAT_SEA_LEVEL) return null
+  return Math.max(ANIMAL_HABITAT_SEA_LEVEL, sensedSurfaceY(state) ?? ANIMAL_HABITAT_SEA_LEVEL)
 }
 
 /**
@@ -14671,7 +14695,9 @@ function exploreMoveCandidate(
       // unexplored terrain, not a route to a sensed source. The typed no-source
       // gap reads it to report `next=explore` instead of `next=escalate`.
       explore: true,
-      purpose: `search:${goalKind}:${producerSearch?.item ?? focusItem ?? 'unexplored_terrain'}`,
+      purpose: `search:${goalKind}:${producerSearch?.item ?? focusItem ??
+        (state.goalQueue?.current?.kind === 'explore' && optionIsSurfaceDirected(state.goalQueue.current, null)
+          ? 'surface' : 'unexplored_terrain')}`,
       ...(exploreRoute === null ? {} : { exploreRoute }),
       ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
       // The producer SEARCH facts, when this search exists because the active
@@ -14733,7 +14759,13 @@ function exploreFallbackCandidates(
 ): Candidate[] {
   const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const limit = Math.max(1, options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES)
+  const surfaceAccessY = surfaceExploreAccessTargetY(state)
+  // A novel underground cell is not evidence of access to the selected surface
+  // search space. Natural steps must reduce the altitude gap; grounded vertical
+  // routes (including their detours/headroom) are offered by the shared ascent
+  // helper. Do not turn generic level/down movement into a surface trajectory.
   const novel = exploreNoveltySpots(state.terrain.standable, state.signals.exploredCells)
+    .filter(spot => surfaceAccessY === null || spot.y > Math.floor(state.self.position.y))
   const best = pickExplore(
     state,
     novel,
