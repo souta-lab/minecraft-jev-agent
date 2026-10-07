@@ -7952,7 +7952,11 @@ function descendCandidates(
 
   const base = steps.filter((step) =>
     (downEvidence || step.mode !== 'down') &&
-    (terminus === null || distance(step.step, terminus) + 0.1 < distance(feet, terminus)),
+    (terminus === null || distance(step.step, terminus) + 0.1 < distance(feet, terminus)) &&
+    // An explicit withheld-route target can differ from the nearest food cell
+    // inherited below. The landing must support both claims; approaching one
+    // target cannot fabricate food reachability toward another.
+    (foodTag === null || target === null || distance(step.step, target.position) + 0.1 < distance(feet, target.position)),
   )
   if (base.length === 0) return []
   // The level-path budget is a hard bound on continuing the SAME selected

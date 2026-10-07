@@ -42,6 +42,7 @@ import {
   defaultCandidateOptions,
   foodSourceGap,
   generateGroundedCandidates,
+  applyReachabilityGate,
   pickFood,
 } from './src/candidates.ts'
 import { formatFoodSourceGap, isEdibleFoodItem } from './src/foodSources.ts'
@@ -959,13 +960,13 @@ addCase('(iv-d) a leg two arms ground for different purposes emits once, carryin
 
 // --- (v) a fed body: the food tiers add nothing -------------------------------
 
-function collectFoodRouteState(fixedSouth = false): WorldState {
+function collectFoodRouteState(fixedSouth = false, sourceName = 'sweet_berry_bush'): WorldState {
   const current = { ...collectGoal(), id: 'g11:collect:food', description: 'collect food', targetItem: 'food', requiredCount: 5 }
   const walls = ([[1, 0], [-1, 0], [0, 1], [0, -1]] as const).map(([x, z]) =>
     ({ at: { x, y: 64, z }, name: 'dirt' }),
   )
   return buildWorldState(
-    fakeBot({ counts: {}, food: 10, health: 1, blocks: [...walls, { at: { x: 55, y: 64, z: 0 }, name: 'sweet_berry_bush' }] }),
+    fakeBot({ counts: {}, food: 10, health: 1, blocks: [...walls, { at: { x: 55, y: 64, z: 0 }, name: sourceName }] }),
     {
       tick: 1,
       goal: makeGoal('food', 5),
@@ -999,6 +1000,33 @@ addCase('(iv-f) prior southward commitment cannot continue an unbound food-class
       Number(c.meta.descentRouteTo) < Number(c.meta.descentRouteFrom)),
     detail: `descents=${descents.map((c) => `${c.id}:${String(c.meta.foodCell)}`).join(',')}`,
   }
+})
+
+addCase('(iv-g) a withheld target cannot give excavation an incompatible nearest-food claim', () => {
+  const state = collectFoodRouteState(false, 'melon')
+  const blocked = {
+    id: 'MOVE:p-3_64_0', kind: 'MOVE' as const, label: 'approach a withheld target',
+    target: { x: -3, y: 64, z: 0 }, targetName: null, targetEntityId: null, itemName: null,
+    requiresTool: false, toolName: null, inReach: false, hasStandableAdjacent: true, meta: {},
+  }
+  const result = applyReachabilityGate([blocked], state, { ...options(), reachability: { pathProbe: () => 'no_path' } })
+  const mislabeled = result.candidates.filter((c) => c.kind === 'DESCEND' && c.meta.foodCell === '55,64,0')
+    .filter((c) => c.target !== null && c.target.x <= 0)
+  return { pass: mislabeled.length === 0,
+    detail: `incompatible=${mislabeled.map((c) => `${c.id}:food=${String(c.meta.foodCell)}:route=${String(c.meta.descentRouteTarget)}`).join(',')} offered=${result.candidates.map(c=>c.id).join(',')}` }
+})
+
+addCase('(iv-h) compatible food and withheld-target excavation remains a typed choice', () => {
+  const state = collectFoodRouteState(false, 'melon')
+  const blocked = {
+    id: 'MOVE:p3_64_0', kind: 'MOVE' as const, label: 'approach a target toward food',
+    target: { x: 3, y: 64, z: 0 }, targetName: null, targetEntityId: null, itemName: null,
+    requiresTool: false, toolName: null, inReach: false, hasStandableAdjacent: true, meta: {},
+  }
+  const result = applyReachabilityGate([blocked], state, { ...options(), reachability: { pathProbe: () => 'no_path' } })
+  const compatible = result.candidates.find((c) => c.kind === 'DESCEND' && c.meta.foodCell === '55,64,0' &&
+    c.target !== null && c.target.x > 0)
+  return { pass: compatible !== undefined, detail: `compatible=${compatible?.id ?? 'none'}` }
 })
 
 addCase('(v) a fed body: no food tag, no gap, and the offer is the hungry offer minus the food tiers', () => {
