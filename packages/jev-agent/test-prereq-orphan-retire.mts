@@ -33,6 +33,10 @@
 import { GoalQueue, PREREQ_REORDERED, PREREQ_RETIRED, setPrereqAuditSink } from './src/goalQueue.ts'
 import type { GoalKind, GoalStatus, QueuedGoal } from './src/goalQueue.ts'
 import { applyCompiledPlan, makeOptionSnapshot } from './src/optionSpec.ts'
+import { installDominatedPrerequisiteReason } from './src/goal-state.ts'
+import type { GoalStateHost } from './src/goal-state.ts'
+import { syncQueue } from './src/goal-queue-plane.ts'
+import type { GoalQueuePlaneHost } from './src/goal-queue-plane.ts'
 
 interface Case {
   name: string
@@ -508,6 +512,96 @@ addCase('(j) a shared producer unions causal owners from distinct accepted consu
     pass,
     detail: `producer=${producer.id} owners=[${owners.join(',')}] bothBeforeRestore=${hasBothBeforeRestore} bothAfterRestore=${hasBothAfterRestore}`,
   }
+})
+
+// Fuel acquisition is a compiler-inserted means to the accepted smelt, not an
+// independent wood objective. Keep the real compiler, persistence and runtime
+// reconciliation wiring in this fixture; stub only unrelated host services.
+function fuelPrerequisiteFixture() {
+  let counts: Record<string, number> = { raw_iron: 16, oak_planks: 3 }
+  const authored = { kind: 'smelt' as const, description: 'smelt iron_ingot', targetItem: 'iron_ingot', requiredCount: 16 }
+  const compiled = applyCompiledPlan([authored], makeOptionSnapshot({ inventory: counts, knownStations: ['furnace'] }),
+    { enabled: true, causalOccurrenceId: 'fuel-batch' })
+  const lines: string[] = []
+  setPrereqAuditSink((line) => lines.push(line))
+  const queue = new GoalQueue()
+  installDominatedPrerequisiteReason({ queue, options: {}, inventorySnapshot: () => counts } as unknown as GoalStateHost)
+  queue.applyPlan(compiled.goals, 'llm')
+  const producer = queue.current!
+  const consumer = queue.state.goals.find((goal) => goal.kind === 'smelt')!
+  const sync = () => syncQueue({ queue, logger: { info() {}, warn() {} }, tickCounter: 1,
+    effectiveHave: () => counts[queue.current?.targetItem ?? ''] ?? 0 } as unknown as GoalQueuePlaneHost, 'inventory_changed')
+  return { queue, lines, producer, consumer, sync, setCounts: (value: Record<string, number>) => { counts = value } }
+}
+
+addCase('(k) coal replaces an inserted plank-based log fuel prerequisite without inventing success', () => {
+  const f = fuelPrerequisiteFixture()
+  const before = f.producer.targetItem === 'log' && f.producer.requiredCount === 8 &&
+    f.consumer.optionSpec?.preconditions.some((p) => p.kind === 'inventoryClassAtLeast' && p.cls === 'fuel' && p.count === 11)
+  f.setCounts({ raw_iron: 16, coal: 8, oak_planks: 1 })
+  // Exercise both JSON restoration and a live inventory boundary. The row must
+  // be retired as obsolete, never DONE as if coal were eight collected logs.
+  f.queue.restore(JSON.parse(JSON.stringify(f.queue.snapshot())))
+  f.sync()
+  const producer = f.queue.state.goals.find((goal) => goal.id === f.producer.id)!
+  return { pass: before === true && producer.status === 'impossible' && producer.haveCount === 0 &&
+    f.queue.current?.id === f.consumer.id && f.queue.state.done === 0 &&
+    f.lines.some((line) => line.includes('PREREQ_DOMINATED') && line.includes('coal') && line.includes(f.consumer.id)),
+    detail: `producer=${producer.status}/${producer.haveCount} current=${f.queue.current?.id} audit=${f.lines.join(' | ')}` }
+})
+
+addCase('(l) fuel prerequisite retirement runs on the live inventory boundary, not only reload', () => {
+  const f = fuelPrerequisiteFixture()
+  f.setCounts({ raw_iron: 16, coal: 2 })
+  f.sync()
+  return { pass: f.queue.current?.id === f.consumer.id && f.queue.state.done === 0,
+    detail: `current=${f.queue.current?.id} done=${f.queue.state.done}` }
+})
+
+addCase('(m) insufficient coal or missing input keeps fuel acquisition live', () => {
+  const f = fuelPrerequisiteFixture()
+  f.setCounts({ raw_iron: 16, coal: 1, oak_planks: 1 })
+  f.sync()
+  const insufficientKept = f.queue.current?.id === f.producer.id
+  f.setCounts({ raw_iron: 15, coal: 8 })
+  f.sync()
+  return { pass: insufficientKept && f.queue.current?.id === f.producer.id && f.lines.length === 0,
+    detail: `insufficientKept=${insufficientKept} current=${f.queue.current?.id} retired=${f.lines.length}` }
+})
+
+addCase('(n) independent wood and wrong-occurrence consumers cannot justify fuel retirement', () => {
+  const f = fuelPrerequisiteFixture()
+  const ledger = f.queue.snapshot()
+  f.setCounts({ raw_iron: 16, coal: 8 })
+  ledger.goals.find((goal) => goal.id === f.consumer.id)!.prerequisiteCausalOwnerIds = ['prereq:other:smelt:iron_ingot#c16']
+  f.queue.restore(ledger)
+  const wrongOwnerKept = f.queue.current?.id === f.producer.id
+  ledger.goals.find((goal) => goal.id === f.consumer.id)!.prerequisiteCausalOwnerIds = [...f.producer.prerequisiteCausalOwnerIds!]
+  ledger.goals.find((goal) => goal.id === f.producer.id)!.semanticOptionInstanceId = 'collect:log#c8'
+  f.queue.restore(ledger)
+  return { pass: wrongOwnerKept && f.queue.current?.id === f.producer.id && f.lines.length === 0,
+    detail: `wrongOwnerKept=${wrongOwnerKept} independentCurrent=${f.queue.current?.id}` }
+})
+
+addCase('(o) a live wood consumer vetoes fuel-only retirement', () => {
+  const f = fuelPrerequisiteFixture()
+  const ledger = f.queue.snapshot()
+  ledger.goals.push(row({ id: 'g99:smelt:charcoal', kind: 'smelt', targetItem: 'charcoal', requiredCount: 8,
+    status: 'pending', prerequisiteCausalOwnerIds: [...f.producer.prerequisiteCausalOwnerIds!] }))
+  f.setCounts({ raw_iron: 16, coal: 8 })
+  f.queue.restore(ledger)
+  return { pass: f.queue.current?.id === f.producer.id && !f.lines.some((line) => line.includes(`id=${f.producer.id}`)),
+    detail: `current=${f.queue.current?.id} retired=${f.lines.length}` }
+})
+
+addCase('(p) the same coal cannot fund two live smelt batches', () => {
+  const f = fuelPrerequisiteFixture()
+  const ledger = f.queue.snapshot()
+  ledger.goals.push({ ...f.consumer, id: 'g99:smelt:iron_ingot' })
+  f.setCounts({ raw_iron: 32, coal: 2 })
+  f.queue.restore(ledger)
+  return { pass: f.queue.current?.id === f.producer.id && !f.lines.some((line) => line.startsWith('PREREQ_DOMINATED')),
+    detail: `current=${f.queue.current?.id} dominated=${f.lines.filter((line) => line.startsWith('PREREQ_DOMINATED')).length}` }
 })
 
 let failures = 0

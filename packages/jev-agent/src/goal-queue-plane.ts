@@ -306,6 +306,9 @@ export function previousDecisionFacts(host: GoalQueuePlaneHost): PreviousDecisio
 
 export function syncQueue(host: GoalQueuePlaneHost,
 trigger: DecisionTrigger): void {
+  // Inventory substitutions can obsolete an inserted prerequisite even when
+  // its own product count is unchanged. Preserve audited retirement, not DONE.
+  host.queue.retireOrphanedPrerequisites()
   // Live diagnosis (M2 hand-off): the queue's light row re-ignited thousands of
   // times without ever completing, and `portalLitTruth` (the row's completion
   // predicate) never ran. Record what the controller believes the current row is

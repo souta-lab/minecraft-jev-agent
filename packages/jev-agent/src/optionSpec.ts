@@ -36,10 +36,10 @@
 // `smelt iron_ingot` with no `raw_iron` expands to `collect raw_iron` first -
 // the same repair the deterministic ladder does with LADDER_PREREQ, but expressed
 // on the Option layer.
-import type { GoalKind, GoalQueueState, GoalStrategy, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import type { DominatedPrerequisiteDecision, GoalKind, GoalQueueState, GoalStrategy, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { ORE_SOURCES } from './state.ts'
 import type { Vec3Json } from './state.ts'
-import { findInventoryFuel, isResourceClass, matchesResourceClass, resourceMatches, sourceUnitsForClass } from './resourceClass.ts'
+import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches, sourceUnitsForClass } from './resourceClass.ts'
 import type { ResourceClass } from './resourceClass.ts'
 import {
   PICKAXE_TIER_ORDER,
@@ -49,6 +49,7 @@ import {
   requiredPickaxeRank1,
   requiredPickaxeRankForItem1,
   smeltInputFor,
+  smeltInventorySufficient,
 } from './gameData.ts'
 import type { RecipeIngredient, RecipeView } from './gameData.ts'
 
@@ -1846,6 +1847,60 @@ export function dependentRows(
       other.prerequisiteCausalOwnerIds?.some((owner) => causalOwners.has(owner)) === true &&
       queueRowPreconditions(other).some((predicate) => rowSatisfiesPredicateExactly(row, predicate)),
   )
+}
+
+/**
+ * An inserted fuel producer can become obsolete when the accepted smelt's
+ * complete input/fuel transfer is already held. This is not producer SUCCESS:
+ * coal does not prove that logs were collected. Require a live dependency
+ * occurrence and the borrowed semantic purpose, and veto any other use of the
+ * producer. Historical class-only consumers still cannot retire fresh work.
+ */
+export function heldSmeltFuelPrerequisiteReason(
+  row: QueuedGoal,
+  ledger: readonly QueuedGoal[],
+  inventory: Readonly<Record<string, number>>,
+): DominatedPrerequisiteDecision | null {
+  const item = row.targetItem
+  const owners = new Set(row.prerequisiteCausalOwnerIds ?? [])
+  const semantic = row.semanticOptionInstanceId
+  if (row.kind !== 'collect' || item === null || owners.size === 0 || !semantic) return null
+  const isFuelTarget = item === 'log' || item === 'planks' || item === 'fuel' || matchesResourceClass(item, 'fuel')
+  if (!isFuelTarget) return null
+  const coveredOwners = new Set<string>()
+  const consumers: string[] = []
+  const held = new Set<string>()
+  const snapshot = makeOptionSnapshot({ inventory })
+  for (const other of ledger) {
+    if (other.id === row.id || (other.status !== 'active' && other.status !== 'pending')) continue
+    const shared = (other.prerequisiteCausalOwnerIds ?? []).filter((owner) => owners.has(owner))
+    if (shared.length === 0) continue
+    const spec = compilePlannedGoal(queuedToPlanned(other), snapshot)
+    const uses = spec.preconditions.filter((predicate) => rowSatisfiesPredicate(row, predicate) ||
+      (predicate.kind === 'inventoryAtLeast' && resourceMatches(predicate.item, item)) ||
+      (predicate.kind === 'inventoryClassAtLeast' &&
+        (predicate.cls === item || (predicate.cls === 'fuel' && isFuelTarget))))
+    if (uses.length === 0) continue
+    if (other.kind !== 'smelt' || other.semanticOptionInstanceId !== semantic ||
+      uses.some((predicate) => predicate.kind !== 'inventoryClassAtLeast' || predicate.cls !== 'fuel')) return null
+    const input = other.targetItem === null ? null : smeltInputFor(other.targetItem)
+    if (input === null) return null
+    const count = Math.max(1, other.requiredCount)
+    // Match the production transaction guard: one concrete input/fuel transfer,
+    // with separate slot reservations when both use the same stack.
+    const inputs = Object.keys(inventory).filter((name) => resourceMatches(name, input))
+    const fuel = inventoryFuels(inventory).find((candidate) => inputs.some((name) =>
+      smeltInventorySufficient(inventory, name, count, candidate.item, fuelCountFor(count, candidate.item))))
+    if (fuel === undefined) return null
+    held.add(`${fuel.item}:${inventory[fuel.item]}:required=${fuelCountFor(count, fuel.item)}`)
+    consumers.push(other.id)
+    shared.forEach((owner) => coveredOwners.add(owner))
+  }
+  // A shared producer for several batches needs joint reservation accounting;
+  // individual readiness cannot prove the same coal funds all of them.
+  if (consumers.length !== 1 || [...owners].some((owner) => !coveredOwners.has(owner))) return null
+  return { item, held: [...held].sort(),
+    reason: `smelt_fuel_already_supplied:consumers=[${consumers.join(',')}]:causalOwners=[${[...coveredOwners].sort().join(',')}]` }
 }
 
 export interface OrphanPrerequisiteDecision {

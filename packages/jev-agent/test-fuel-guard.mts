@@ -201,17 +201,17 @@ addCase('a held log plus non-log fuel also suppresses the charcoal log retrieval
   return { pass, detail: `retrieve=${found?.id ?? 'none'} fuel=${JSON.stringify(fuelSatisfaction(state))}` }
 })
 
-addCase('without held fuel the surface retrieval is still emitted', () => {
+addCase('without held fuel a reachable higher-ground surface retrieval is still emitted', () => {
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goal: goal({}),
     current: queuedGoal({}),
-    // a placeable block makes the 6-block climb mechanically reachable, so the
-    // affordance gate presents the retrieval (needs_ascend otherwise).
+    // The sensor's standable envelope is +/-1 Y. A six-block fixture gap
+    // requires a separately grounded ascent; it does not isolate fuel absence.
     inventory: inventory({ cobblestone: 4 }),
     standable: [
       { x: 0, y: 60, z: 0 },
-      { x: 2, y: 66, z: 0 },
+      { x: 2, y: 61, z: 0 },
     ],
   })
   const found = retrieval(generateCandidates(state, defaultCandidateOptions))

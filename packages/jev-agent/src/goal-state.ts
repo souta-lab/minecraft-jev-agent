@@ -17,7 +17,7 @@ import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts
 import type { EventLogger } from './jev.ts'
 import { FLINT_AND_STEEL, IRON_INGOT, OBSIDIAN, PORTAL_OBSIDIAN_REQUIRED } from './netherPortalPlan.ts'
 import type { PortalFrameSite } from './netherPortalPlan.ts'
-import { makeOptionSnapshot } from './optionSpec.ts'
+import { heldSmeltFuelPrerequisiteReason, makeOptionSnapshot } from './optionSpec.ts'
 import type { OptionWorldSnapshot } from './optionSpec.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
@@ -194,11 +194,10 @@ export function queuePreconditionSnapshot(host: GoalStateHost): OptionWorldSnaps
 
 export function installDominatedPrerequisiteReason(host: GoalStateHost): void {
   const reason = host.options.dominatedGoalReason
-  if (reason === undefined) {
-    host.queue.setDominatedPrerequisiteReason(null)
-    return
-  }
-  host.queue.setDominatedPrerequisiteReason((goal) => reason(goal, host.inventorySnapshot()))
+  host.queue.setDominatedPrerequisiteReason((goal) => {
+    const inventory = host.inventorySnapshot()
+    return heldSmeltFuelPrerequisiteReason(goal, host.queue.state.goals, inventory) ?? reason?.(goal, inventory) ?? null
+  })
 }
 
 
