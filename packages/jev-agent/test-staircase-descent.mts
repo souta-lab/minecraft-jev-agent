@@ -232,6 +232,19 @@ function descendOf(candidates: readonly Candidate[]): Candidate | undefined {
   return candidates.find((candidate) => candidate.kind === 'DESCEND')
 }
 
+/** The sensed apple canopy that made the live forage fallback enumerate routes. */
+function addDistantFoodCanopy(state: WorldState): void {
+  const p = state.self.position
+  state.blocks.push({
+    kind: 'stone', name: 'oak_leaves',
+    position: { x: Math.floor(p.x) + 20, y: p.y + 60, z: Math.floor(p.z) + 2 },
+    distance: Math.hypot(20, 60, 2), diggable: true, inReach: false,
+    hasAdjacentStandable: false, adjacentStandable: null,
+    yield: 'apple', harvestTool: null, harvestTier: null,
+    foodRoute: 'forage', foodItem: 'apple',
+  })
+}
+
 // --- (a) one heading, one profile, step after step --------------------------------
 
 addCase('(a) a 10-step descent down a stone column holds ONE heading', () => {
@@ -577,6 +590,56 @@ addCase('(c3) the shaft the body already dug is offered as a remembered route', 
       shaft.meta.tunnelY === 60,
     detail: `set=[${candidates.map((candidate) => candidate.id).join(',')}] shaft=${shaft?.id ?? 'none'} vertical=${String(shaft?.meta.vertical)}`,
   }
+})
+
+// p27: a selected surface-search ascent exposed an open step back down into
+// its own staircase. The empty MOVE route bypassed the p24 direction boundary
+// already applied to carved column DESCENDs. Translate the measured geometry;
+// do not bake live coordinates into the fixture or production admission.
+for (const remembered of [false, true]) {
+  addCase(`(surface direction) a hungry underground surface search refuses an ${remembered ? 'old remembered' : 'open'} down route`, () => {
+    const position = { ...FEET, y: 9 }
+    const open = stoneStep(position, 'E', 1, 0, {
+      safe: false, refusal: 'open_floor', floorSolid: false,
+      wallSolid: false, headSolid: false, diggable: false, digs: [],
+    })
+    const current = queued({
+      kind: 'explore', targetItem: null, targetY: null,
+      optionInstanceId: 'explore:surface', optionTemplateId: 'explore:surface',
+    })
+    const state = worldState({
+      position, descent: remembered ? [] : [open],
+      standable: [{ x: 8, y: 9, z: 20 }], queue: queue(current),
+      signals: signals(remembered ? { lastTunnel: { x: 8, y: 7, z: 20 } } : {}),
+      inventory: inventory({ iron_ingot: 4, coal: 7, cobblestone: 114 }),
+    })
+    state.self.health = 1
+    state.self.food = 0
+    addDistantFoodCanopy(state)
+    const candidates = generateCandidates(state, defaultCandidateOptions)
+    const shaft = candidates.find(candidate =>
+      candidate.meta.verticalRecovery === 'open_shaft_step' ||
+      candidate.meta.verticalRecovery === 'remembered_shaft')
+    return { pass: shaft === undefined, detail: `set=[${candidates.map(c => c.id).join(',')}] down=${shaft?.id ?? 'none'}` }
+  })
+}
+
+addCase('(surface direction) above the search band the same open step still approaches surface ground', () => {
+  const position = { ...FEET, y: 67 }
+  const open = stoneStep(position, 'E', 1, 0, {
+    safe: false, refusal: 'open_floor', floorSolid: false,
+    wallSolid: false, headSolid: false, diggable: false, digs: [],
+  })
+  const current = queued({
+    kind: 'explore', targetItem: null, targetY: null,
+    optionInstanceId: 'explore:surface', optionTemplateId: 'explore:surface',
+  })
+  const state = worldState({ position, descent: [open], queue: queue(current), standable: [{ x: 8, y: 67, z: 20 }] })
+  state.self.food = 0
+  addDistantFoodCanopy(state)
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const shaft = candidates.find(candidate => candidate.meta.verticalRecovery === 'open_shaft_step')
+  return { pass: shaft?.target?.y === 66, detail: `set=[${candidates.map(c => c.id).join(',')}] down=${shaft?.id ?? 'none'}` }
 })
 
 // --- (d) typed refusals are unchanged ---------------------------------------------

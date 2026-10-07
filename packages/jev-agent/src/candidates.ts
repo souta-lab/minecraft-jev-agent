@@ -17182,10 +17182,20 @@ function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candi
  * A DESCEND cannot express either one: a DESCEND is a DIG action, and these cells
  * have nothing left to dig. Both are therefore ordinary MOVEs. Reuse-before-carve
  * is expressed as enumeration order (existing routes first) and never as a
- * ranking: nothing is suppressed and Jev still chooses between walking the known
- * route and cutting a new step.
+ * ranking: Jev still chooses among purpose-compatible routes. An empty down
+ * route has the same direction boundary as a carved column descent.
  */
 function existingDescentRouteCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const current = state.goalQueue?.current ?? null
+  if (
+    optionIsSurfaceDirected(current, current?.targetItem ?? state.goal.targetItem ?? null) &&
+    state.self.position.y < ANIMAL_HABITAT_SEA_LEVEL
+  ) {
+    // An opening back into the shaft is physically safe, but does not advance
+    // this surface-directed search. Sensed producer routes and up-routes keep
+    // their separate grounded contracts; do not relabel generic descent as one.
+    return []
+  }
   const feet = {
     x: Math.floor(state.self.position.x),
     y: Math.floor(state.self.position.y),
