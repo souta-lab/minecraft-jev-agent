@@ -21,7 +21,7 @@ import { evaluateGoalSuccess } from './goalSuccess.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
 import { goalResourceMatches, resourceMatches } from './resourceClass.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
-import { abandonRequested, decisionIdFrom } from './jev.ts'
+import { ACTION_DECLINE_LABEL, abandonRequested, actionDeclined, decisionIdFrom } from './jev.ts'
 import type { EventLogger, JevResult } from './jev.ts'
 import type { JevSemanticProjection, PreviousDecisionFacts, SkillOutcomePacket } from './jev/semantic-projection.ts'
 import { FLINT_AND_STEEL, IRON_INGOT, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE } from './netherPortalPlan.ts'
@@ -96,7 +96,7 @@ export interface GoalQueuePlaneHost {
 
 export function logHeads(host: GoalQueuePlaneHost,
 result: JevResult, verdict: AbandonVerdict, chainId: string | null = null): void {
-  const action = decisionIdFrom(result) ?? 'WAIT'
+  const action = actionDeclined(result) ? ACTION_DECLINE_LABEL : decisionIdFrom(result) ?? 'WAIT'
   const abandon = result.answers.abandon_option?.probability ?? null
   const vote = verdict.vote
   host.logger.info(

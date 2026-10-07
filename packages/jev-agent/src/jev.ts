@@ -15,6 +15,7 @@ export type { AuthorityDecisionMeta, AuthorityTaggedJevResult } from './jev/auth
 
 import { FatalModelError } from './modelFailure.ts'
 import {
+  actionDeclined,
   abandonRequested as legacyAbandonRequested,
   createJevPolicy as createLegacyJevPolicy,
   resolveJevApiKey,
@@ -38,7 +39,11 @@ export const PRIMARY_INSTRUCTIONS = AUTHORITY_PRIMARY_INSTRUCTIONS
 export const buildQuestions = buildAuthorityQuestions
 
 /**
- * Public beta adoption gate.
+ * Public Option termination request gate.
+ *
+ * The explicit singleton DECLINE is a separate model-selected refusal vote.
+ * It enters the same protected/deferred lifecycle without changing raw Noul
+ * probabilities or the serving profile's calibrated probability threshold.
  *
  * The real authority policy stamps the exact Option instance's threshold and the
  * raw P(abandon=true) onto the JevResult. This function consumes that stamped
@@ -47,6 +52,7 @@ export const buildQuestions = buildAuthorityQuestions
  * metadata use the historical global threshold helper.
  */
 export function abandonRequested(result: JevResult, threshold?: number): boolean {
+  if (actionDeclined(result)) return true
   if (threshold !== undefined) return legacyAbandonRequested(result, threshold)
   const tagged = result as Partial<AuthorityTaggedJevResult>
   const decision = tagged.authorityDecision

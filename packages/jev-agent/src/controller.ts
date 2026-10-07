@@ -66,7 +66,7 @@ import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { NETHER, OBSIDIAN, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatSkillStep, formatSkillStepAuthority } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
-import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, resolveLowConfidenceThreshold } from './jev.ts'
+import { ACTION_DECLINE_LABEL, abandonRequested, actionDeclined, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, resolveLowConfidenceThreshold, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from './modelFailure.ts'
 import type { JevPolicy, JevResult } from './jev.ts'
@@ -2803,14 +2803,15 @@ export class JevController {
       }
       this.logBetaShadow(causalStamp.optionId, decision, needLlmAdopted)
 
-      const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
+      const declined = actionDeclined(decision)
+      const rawChosenId = declined ? ACTION_DECLINE_LABEL : decisionIdFrom(decision) ?? 'WAIT'
       // SAFE: a hard-safety reflex is never held behind a skill lease or a
       // previous model decision - it exists to interrupt them. Both commitment
       // layers are model-decision machinery, so a reflex tick passes them by;
       // the guard below still validates the candidate mechanically.
       // mechanically.
-      const committedId = reflex === null ? this.applyCandidateCommitment(rawChosenId, candidates, state) : rawChosenId
-      const heldId = reflex === null ? this.applyActionCommitment(committedId, candidates, state) : committedId
+      const committedId = reflex === null && !declined ? this.applyCandidateCommitment(rawChosenId, candidates, state) : rawChosenId
+      const heldId = reflex === null && !declined ? this.applyActionCommitment(committedId, candidates, state) : committedId
       // Keep Jev's danger score as model evidence in the decision record only.
       // It cannot replace pi's selected semantic action. The exact code-owned
       // safety envelope and reflex above already restrict/interrupt choices when
@@ -2819,8 +2820,10 @@ export class JevController {
       // Re-groundable: a vanished survival action is replaced below by the SAME
       // action kind from the fresh offer (see the guard at the revalidation).
       let chosenId = heldId
-      this.noteWaitStreak(chosenId, actionable)
-      this.checkWedge(chosenId)
+      if (!declined) {
+        this.noteWaitStreak(chosenId, actionable)
+        this.checkWedge(chosenId)
+      }
 
       if (this.criticalArrivedDuringFlight(trigger)) {
         // §3: this is the live "late async model result" case in this
@@ -2871,6 +2874,37 @@ export class JevController {
           {},
           this.tickCounter,
         )
+      }
+
+      if (declined) {
+        // decide() already passed this refusal through the existing beta
+        // lifecycle/protection/deferral gates. No candidate was selected for
+        // actuation: preserve the refusal instead of inventing an unoffered WAIT.
+        this.decisionWriter.write(makeDecisionRecord({
+          decisionId: randomUUID(), tick: this.tickCounter, trigger,
+          stateHash: stableStateHash(state), chainId: causalStamp.chainId,
+          optionId: causalStamp.optionId, semanticOptionInstanceId: causalStamp.semanticOptionInstanceId,
+          strategy: causalStamp.strategy, candidates, failedCandidates: this.failureSnapshot(),
+          jev: this.jevLog(decision, dangerGate, trigger), chosenAction: ACTION_DECLINE_LABEL,
+          confidence: decision.answers.action?.confidence ?? null, dangerOverride: null,
+          needLlm: null, needLlmAdopted: this.lastAbandonAdopted,
+          goalQueueState: toGoalQueueStateLog(state.goalQueue),
+          llmResummon: pickResummon(this.tickResummonLog, this.lastAbandonAdopted),
+          llm: this.llmLog(), subgoal: this.consumeTransition(), inventory: state.inventory.counts,
+        }, this.options.decisionProvenance))
+        writeOutcome(this.jevWriter, {
+          callId: decision.callId, policy: decision.policy, actionId: null,
+          executed: false, verified: false, failureCode: null, goalProgress: 0,
+          note: 'model_declined_singleton; no actuation',
+        })
+        const epoch = this.decisionEpochs.active
+        if (epoch !== null) this.decisionEpochs.close({ epoch: epoch.epoch, reason: 'no_authorization' })
+        this.logger.info('policy', 'JEV_ACTION_DECLINED -> protected abandonment lifecycle; no actuation', {
+          callId: decision.callId, optionId: causalStamp.optionId,
+          abandonAdopted: this.lastAbandonAdopted,
+          betaProbability: decision.answers.abandon_option?.probability ?? null,
+        }, this.tickCounter)
+        return
       }
 
       let freshState = buildWorldState(
