@@ -433,26 +433,60 @@ function main(): void {
     )
   }
 
-  // (c) Generic: the same arm exposes the DESCEND family for a collect goal with
-  // a proven safe down step. No item/coordinate special-casing.
+  // (c) Generic: a safe down step is a recovery fact only when it actually
+  // advances toward the exact locomotion terminus that was withheld. This pins
+  // the exact-terminus contract added after the old fixture was written: safe
+  // excavation by itself is not evidence that a refused route improves.
   {
     const collect = worldState({
       goal: goal('cobblestone'),
       goalQueue: queueWith(queuedGoal('cobblestone', 'collect')),
       descent: [downDescent()],
     })
+    const belowTarget: Vec3Json = { x: 0, y: 54, z: -12 }
+    const blockedBelow: Candidate = {
+      ...unreachableMove(collect.tick),
+      id: `MOVE:p${belowTarget.x}_${belowTarget.y}_${belowTarget.z}`,
+      target: belowTarget,
+    }
+    const belowOptions: CandidateOptions = {
+      ...defaultCandidateOptions,
+      reachability: {
+        memory: null,
+        pathProbe: (position) =>
+          position.x === belowTarget.x && position.y === belowTarget.y && position.z === belowTarget.z
+            ? 'no_path'
+            : 'reachable',
+      },
+    }
     const grounded = applyReachabilityGate(
-      [waitCandidate(collect.tick), unreachableMove(collect.tick)],
+      [waitCandidate(collect.tick), blockedBelow],
       collect,
-      optionsWith(),
+      belowOptions,
     )
     const descend = grounded.candidates.find(
       (candidate) => candidate.kind === 'DESCEND' && candidate.meta.capabilityAcquisition === true,
     )
     check(
-      '(c) a collect goal with a safe down step yields the DESCEND recovery candidate',
-      descend !== undefined && descend.meta.missingCapability === 'open_path' && descend.meta.safe === true,
-      `descend=${descend === undefined ? 'none' : `${descend.id} -> ${String(descend.target?.x)},${String(descend.target?.y)},${String(descend.target?.z)}`} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+      '(c) a collect goal with an advancing safe down step yields the DESCEND recovery candidate',
+      descend !== undefined &&
+        descend.meta.missingCapability === 'open_path' &&
+        descend.meta.safe === true &&
+        Number(descend.meta.descentRouteTo) < Number(descend.meta.descentRouteFrom),
+      `descend=${descend === undefined ? 'none' : `${descend.id} -> ${String(descend.target?.x)},${String(descend.target?.y)},${String(descend.target?.z)} route=${String(descend.meta.descentRouteFrom)}->${String(descend.meta.descentRouteTo)}`} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+    )
+
+    const lateral = applyReachabilityGate(
+      [waitCandidate(collect.tick), unreachableMove(collect.tick)],
+      collect,
+      optionsWith(),
+    )
+    check(
+      '(c2) a safe down step that moves away from the withheld terminus is not fabricated as recovery',
+      !lateral.candidates.some(
+        (candidate) => candidate.kind === 'DESCEND' && candidate.meta.capabilityAcquisition === true,
+      ),
+      `target=${OPEN_TARGET.x},${OPEN_TARGET.y},${OPEN_TARGET.z} candidates=[${lateral.candidates.map((candidate) => candidate.id).join(',')}]`,
     )
   }
 

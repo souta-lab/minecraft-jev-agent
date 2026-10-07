@@ -680,8 +680,8 @@ const ascentsOf = (candidates: readonly Candidate[]): Candidate[] =>
 // ---------------------------------------------------------------------------
 {
   const source = await Bun.file(new URL('./src/candidates.ts', import.meta.url)).text()
-  const habitatGate = source.indexOf('if (Math.floor(state.self.position.y) >= ANIMAL_HABITAT_SEA_LEVEL) return { candidates: [], refusal: null }')
-  const surfaceGate = source.indexOf("if (current?.kind !== 'surface') return { candidates: [], refusal: null }")
+  const habitatGate = source.indexOf('if (aboveBand && sealed === null) return { candidates: [], refusal: null }')
+  const surfaceGate = source.indexOf("if (current?.kind !== 'surface' && searchTargetY === null) return { candidates: [], refusal: null }")
   check(
     '(viii) the surface/habitat arms keep their own gates (unchanged by the general remedy)',
     habitatGate > 0 && surfaceGate > 0,

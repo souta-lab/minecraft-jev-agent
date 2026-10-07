@@ -674,12 +674,12 @@ addCase('down step: falling head cell refuses', () => {
     detail: `faller=${String(observed)}`,
   }
 })
-addCase('down step: faller above an open head is not the dig\'s refill', () => {
+addCase('down step: faller above the transit head is a refill hazard', () => {
   const head: Vec3Json = { x: 21, y: 61, z: -46 }
   const observed = descentStepFallerAt('down', head, (x, y, z) =>
     x === 21 && y === 62 && z === -46 ? blockAt('gravel') : null)
   return {
-    pass: observed === null,
+    pass: observed === 'gravel',
     detail: `faller=${String(observed)}`,
   }
 })

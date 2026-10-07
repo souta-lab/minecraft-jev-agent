@@ -1114,7 +1114,7 @@ function worldWithEntities(
     // the drop fact is producer truth, not a preference
     producerDropFor('blaze') === 'blaze_rod' &&
     producerDropFor('enderman') === 'ender_pearl' &&
-    producerDropFor('cow') === null &&
+    producerDropFor('cow') === 'beef' &&
     blazeAttack?.meta.dropItem === 'blaze_rod'
   report(
     pass,

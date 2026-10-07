@@ -249,27 +249,25 @@ addCase('underground log goal emits a RETRIEVE toward the remembered coordinate'
   return { pass, detail: found === null ? 'no RETRIEVE' : `${found.id} ${JSON.stringify(found.meta)}` }
 })
 
-addCase('surface-only log goal falls back to a surface-ward RETRIEVE when nothing is remembered', () => {
+addCase('surface-only log goal realizes missing-source search as a grounded ascent, not a synthetic RETRIEVE', () => {
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goal: goal({}),
     goalQueue: queueWith(queuedGoal({})),
     signals: signals(),
-    // the 6-block climb needs a mechanically available ascend plan (placeable
-    // block), otherwise the affordance gate withholds the surface trip.
     inventory: inventory({ cobblestone: 4 }),
     standable: [
       { x: 0, y: 60, z: 0 },
       { x: 2, y: 66, z: 0 },
     ],
   })
-  const found = retrievalCandidate(generateCandidates(state, defaultCandidateOptions))
-  const pass =
-    found !== null &&
-    found.meta.retrieval === 'surface' &&
-    found.target?.y === 66 &&
-    found.label.includes('surface')
-  return { pass, detail: found === null ? 'no RETRIEVE' : `${found.id} target=${JSON.stringify(found.target)}` }
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const ascent = candidates.find(
+    (candidate) => candidate.kind === 'MOVE' && typeof candidate.meta.vertical === 'string' &&
+      candidate.target !== null && candidate.target.y > state.self.position.y,
+  )
+  const pass = retrievalCandidate(candidates) === null && ascent !== undefined
+  return { pass, detail: `set=[${candidates.map((candidate) => candidate.id).join(',')}] ascent=${ascent?.id ?? 'none'}` }
 })
 
 addCase('a visible log suppresses retrieval (normal mining keeps priority)', () => {

@@ -728,7 +728,7 @@ function descentOption(state: WorldState, dir: DescentDir, mode: 'down' | 'level
   return (state.descent ?? []).find((step) => step.dir === dir && step.mode === mode)
 }
 
-addCase('(s1) a solid stone column senses a 1x2 profile: front cell then landing cell', () => {
+addCase('(s1) a solid stone column senses the full down-transit profile: front, head, then landing', () => {
   const feet: Vec3Json = { x: 8, y: 63, z: 20 }
   const state = sensed(feet)
   const e = descentOption(state, 'E', 'down')
@@ -740,9 +740,10 @@ addCase('(s1) a solid stone column senses a 1x2 profile: front cell then landing
   return {
     pass:
       e.safe === true &&
-      cells.length === 2 &&
+      cells.length === 3 &&
       cells[0] === `${e.wall.x},${e.wall.y},${e.wall.z}` &&
-      cells[1] === `${e.floor.x},${e.floor.y},${e.floor.z}` &&
+      cells[1] === `${e.head.x},${e.head.y},${e.head.z}` &&
+      cells[2] === `${e.floor.x},${e.floor.y},${e.floor.z}` &&
       primary.x === e.floor.x &&
       primary.y === e.floor.y &&
       e.supportSolid === true &&
@@ -787,7 +788,7 @@ addCase('(s3) an already-open floor with support underneath senses as a step-dow
       e.hazardNearby === false &&
       e.floorSolid === false &&
       descentDigPlan(e).map((item) => `${item.cell.x},${item.cell.y},${item.cell.z}`).join(';') ===
-        `${e.wall.x},${e.wall.y},${e.wall.z}`,
+        `${e.head.x},${e.head.y},${e.head.z};${e.wall.x},${e.wall.y},${e.wall.z}`,
     detail: `refusal=${String(e.refusal)} support=${String(e.supportSolid)} hazard=${String(e.hazardNearby)} digs=[${descentDigPlan(e).map((item) => `${item.cell.x},${item.cell.y},${item.cell.z}`).join(' | ')}]`,
   }
 })

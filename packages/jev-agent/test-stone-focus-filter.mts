@@ -393,12 +393,13 @@ addCase('(2) a descend_to predicate goal still offers DESCEND', () => {
   }
 })
 
-// (2)(c) a resource-class log goal keeps DESCEND (historical behaviour).
-addCase('(2) collect log keeps the DESCEND step unchanged (class focus)', () => {
+// (2)(c) logs are a surface resource: descending without a sensed/remembered
+// source would move away from the producer class and is not a grounded route.
+addCase('(2) collect log with no underground source withholds the purposeless DESCEND step', () => {
   const state = build('collect', 'log', 'collect 3 x log', [], null, true)
   const descends = descendsOf(state)
   return {
-    pass: descends.length > 0,
+    pass: descends.length === 0,
     detail: `descends=${describeIds(descends)}`,
   }
 })

@@ -213,7 +213,7 @@ const declined = {
 } as unknown as JevResult
 assert.equal(decisionIdFrom(declined), null, 'DECLINE actuates nothing')
 assert.ok(actionDeclined(declined), 'DECLINE surfaces as a decline for the beta path')
-assert.equal(abandonRequested(declined, 0.5), false, 'beta stays separately judged')
+assert.equal(abandonRequested(declined, 0.5), true, 'DECLINE itself requests the protected/deferred termination lifecycle')
 
 // The authority kernel accepts DECLINE only when the offer was a singleton.
 const declinePolicy = new AuthorityJevPolicy(

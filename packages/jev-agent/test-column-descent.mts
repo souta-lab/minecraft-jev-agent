@@ -873,13 +873,17 @@ addCase('(p24) explore:surface below the surface band refuses the down-step', ()
   })
   const state = pocketState(surfaceRow)
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const withheldSurfaceAscent = grounded.withheld.some(
+    (entry) => entry.candidate.meta.surfaceAscent === true && entry.result.reason === 'needs_ascend',
+  )
   const pass =
     strandedOnColumn(state) &&
-    grounded.columnDescentRefusal?.reason === 'direction_mismatch' &&
+    grounded.columnDescentRefusal === null &&
+    withheldSurfaceAscent &&
     grounded.candidates.every((candidate) => candidate.kind !== 'DESCEND')
   return {
     pass,
-    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} withheldSurface=${withheldSurfaceAscent} set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
   }
 })
 

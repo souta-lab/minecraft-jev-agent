@@ -185,14 +185,21 @@ function retrieves(counts: number) {
   )
 }
 
-addCase('B1: oak_log:1 leaves the collect-2-log head retrievable and does NOT leak the ore retrieve', () => {
-  const found = retrieves(1)
-  const logRetrieve = found.find((candidate) => candidate.meta.resource === 'log')
-  const leakedOre = found.find((candidate) => candidate.id.startsWith('RETRIEVE:known:raw_iron'))
-  const pass = logRetrieve !== undefined && leakedOre === undefined
+addCase('B1: oak_log:1 realizes the surface-only fuel search as ascent and does NOT leak the ore retrieve', () => {
+  const state = fuelLeakWorld(1)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const logRetrieve = grounded.candidates.find(
+    (candidate) => candidate.kind === 'RETRIEVE' && candidate.meta.resource === 'log',
+  )
+  const ascent = grounded.candidates.find(
+    (candidate) => candidate.kind === 'MOVE' && typeof candidate.meta.vertical === 'string' &&
+      candidate.target !== null && candidate.target.y > state.self.position.y,
+  )
+  const leakedOre = grounded.candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:raw_iron'))
+  const pass = logRetrieve === undefined && ascent !== undefined && leakedOre === undefined
   return {
     pass,
-    detail: `retrieves=${JSON.stringify(found.map((c) => ({ id: c.id, resource: c.meta.resource })))}`,
+    detail: `set=${JSON.stringify(grounded.candidates.map((c) => ({ id: c.id, kind: c.kind, resource: c.meta.resource })))}`,
   }
 })
 

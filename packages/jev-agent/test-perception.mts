@@ -453,7 +453,7 @@ addCase('(1/p23.19) the far tier stays off while a near hand-mineable producer e
 
 // --- (2) remembered coordinates never satisfy an in-reach predicate ------------
 
-const rememberedInReach: StationEntry = { x: 29, y: 48, z: 34, source: 'remembered' }
+const rememberedInReach: StationEntry = { x: 30, y: 47, z: 34, source: 'remembered' }
 
 addCase('(2) an in-reach remembered table never produces an in-place CRAFT candidate', () => {
   const base = perceive([], { crafting_table: [], furnace: [] })

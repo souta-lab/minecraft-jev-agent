@@ -204,10 +204,10 @@ function main(): void {
   process.stdout.write('tool recovery: a missing capability craftable from the inventory is offered\n')
   process.stdout.write('-'.repeat(78) + '\n')
 
-  // (a) THE LIVE SHAPE. The controller's explicit unreachable set is empty (the
-  // one-decision lag), so both station retrieves are generated and the gate
-  // withholds them for `needs_descend` + `tool:pickaxe@0`. The gate must still
-  // surface the 2x2 inventory-grid table craft instead of a WAIT/ESCALATE pair.
+  // (a) CURRENT CONTRACT. Clearance blocks do not require a harvest tool when
+  // the route only needs the cell opened; the drop is irrelevant. Therefore the
+  // durable station routes remain executable and no synthetic pickaxe/table
+  // acquisition is introduced solely to clear ordinary stone.
   {
     const state = world(queued({}), LIVE_INV, KNOWN, new Set())
     const grounded = generateGroundedCandidates(state, options())
@@ -215,21 +215,19 @@ function main(): void {
     const withheldTool = grounded.withheld.filter((entry) =>
       entry.result.missingCapabilities.some((capability) => capability.kind === 'tool' && capability.tool === 'pickaxe'),
     )
+    const stationRoutes = grounded.candidates.filter(
+      (candidate) => candidate.kind === 'RETRIEVE' && candidate.meta.resourceKind === 'station',
+    )
     const productive = grounded.candidates.filter(isProductive)
     check(
-      '(a) live shape: both station retrieves are withheld for tool:pickaxe@0',
-      withheldTool.length === 2 &&
-        withheldTool.every((entry) => entry.result.reason === 'needs_descend'),
-      `withheld=[${grounded.withheld.map((entry) => `${entry.candidate.id}:${entry.result.reason}`).join(', ')}]`,
+      '(a) hand-breakable clearance keeps the durable station routes grounded without a pickaxe capability',
+      stationRoutes.length >= 1 && withheldTool.length === 0,
+      `stations=[${ids(stationRoutes)}] withheld=[${grounded.withheld.map((entry) => `${entry.candidate.id}:${entry.result.reason}`).join(', ')}]`,
     )
     check(
-      '(a) live shape: the 2x2 inventory-grid craft:crafting_table is offered as the enabling step',
-      table !== undefined &&
-        table.kind === 'CRAFT' &&
-        table.meta.capabilityAcquisition === true &&
-        table.meta.missingCapability === 'tool:pickaxe@0' &&
-        table.meta.requiresTable === false,
-      `table=${table === undefined ? 'none' : JSON.stringify({ id: table.id, cap: table.meta.missingCapability, requiresTable: table.meta.requiresTable })}`,
+      '(a) a usable remembered station suppresses redundant crafting_table acquisition',
+      table === undefined,
+      `table=${table?.id ?? 'none'} presented=[${ids(grounded.candidates)}]`,
     )
     check(
       '(a) live shape: the body is no longer starved (>=1 productive candidate)',
@@ -238,28 +236,27 @@ function main(): void {
     )
   }
 
-  // (a2) ONCE THE TABLE IS PLACED (planks 5 -> 1, table sensed in reach), the
-  // still-withheld station retrieve must yield the table-requiring pickaxe the
-  // inventory can actually make: craft:stone_pickaxe (3 cobblestone + 2 sticks).
+  // (a2) Once a table is sensed in reach, ordinary clearance still does not
+  // become a harvesting task. The station/furnace route may coexist with normal
+  // craft choices, but no stone_pickaxe capability is fabricated for clearance.
   {
     const state = world(queued({}), { ...LIVE_INV, oak_planks: 1 }, KNOWN, new Set(), {
       craftingTables: [{ x: 20, y: 80, z: -4, source: 'sensed' } as StationEntry],
     })
     const grounded = generateGroundedCandidates(state, options())
     const stone = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:stone_pickaxe')
+    const furnaceRoute = grounded.candidates.find(
+      (candidate) => candidate.kind === 'RETRIEVE' && candidate.meta.resource === 'furnace',
+    )
     check(
-      '(a2) after the table is placed, craft:stone_pickaxe follows for the withheld station route',
-      stone !== undefined &&
-        stone.kind === 'CRAFT' &&
-        stone.meta.capabilityAcquisition === true &&
-        stone.meta.missingCapability === 'tool:pickaxe@0',
+      '(a2) sensed-table state keeps a grounded furnace route without inventing a clearance pickaxe',
+      stone === undefined && furnaceRoute !== undefined,
       `presented=[${ids(grounded.candidates)}]`,
     )
   }
 
-  // (a3) the System2 plan head is `craft 1 x furnace`: the same enabling chain
-  // must be offered there (the compressor compiled craft furnace -> place furnace
-  // -> smelt charcoal, and the furnace craft is a 3x3 recipe).
+  // (a3) A craft:furnace head obeys station-use-before-craft: durable usable
+  // stations are routes, so making a duplicate crafting_table is not.
   {
     const state = world(
       queued({ id: 'g17:craft:furnace', kind: 'craft', description: 'craft 1 x furnace', targetItem: 'furnace' }),
@@ -269,31 +266,31 @@ function main(): void {
     )
     const grounded = generateGroundedCandidates(state, options())
     const table = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+    const retrieve = stationRetrieve(grounded.candidates)
     check(
-      '(a3) craft:furnace with only unreachable stations offers the table craft',
-      table !== undefined && table.meta.requiresTable === false,
+      '(a3) craft:furnace prefers a durable station route over a duplicate table craft',
+      table === undefined && retrieve !== undefined,
       `presented=[${ids(grounded.candidates)}]`,
     )
   }
 
-  // (b) THE MATERIALS ARE NOT HELD: no unexecutable craft may be fabricated and
-  // the refusal must NAME the missing tool instead of silently idling.
+  // (b) With no tool-crafting materials, clearance still stays a hand-breakable
+  // route. The generator must not fabricate tool/station crafts merely because
+  // the old harvest-tool model would have asked for a pickaxe.
   {
     const state = world(queued({}), { dirt: 3 }, KNOWN, new Set())
     const grounded = generateGroundedCandidates(state, options())
     const bogusCraft = grounded.candidates.some(
       (candidate) => candidate.id === 'CRAFT:crafting_table' || candidate.id === 'CRAFT:stone_pickaxe',
     )
-    const escalate = grounded.candidates.find((candidate) => candidate.kind === 'ESCALATE')
-    const named =
-      String(escalate?.meta.capabilities ?? '').includes('tool:pickaxe') ||
-      grounded.withheld.some((entry) =>
-        entry.result.missingCapabilities.some((capability) => capability.kind === 'tool' && capability.tool === 'pickaxe'),
-      )
+    const retrieve = stationRetrieve(grounded.candidates)
+    const missingPickaxe = grounded.withheld.some((entry) =>
+      entry.result.missingCapabilities.some((capability) => capability.kind === 'tool' && capability.tool === 'pickaxe'),
+    )
     check(
-      '(b) with no materials the recovery fabricates no unexecutable craft and names the missing tool',
-      !bogusCraft && named,
-      `presented=[${ids(grounded.candidates)}] escalate=${escalate === undefined ? 'none' : String(escalate.meta.capabilities ?? '')} withheld=[${grounded.withheld.map((entry) => entry.candidate.id).join(', ')}]`,
+      '(b) no-material state invents neither a clearance tool nor a duplicate station craft',
+      !bogusCraft && !missingPickaxe && retrieve !== undefined,
+      `presented=[${ids(grounded.candidates)}] withheld=[${grounded.withheld.map((entry) => entry.candidate.id).join(', ')}]`,
     )
   }
 

@@ -60,8 +60,8 @@ const FLEE_SPOT_2: Vec3Json = { x: -3, y: 10, z: 3.5 }
 const SKELETON_POSITION: Vec3Json = { x: 10.5, y: 10, z: 0.5 }
 const SKELETON_DISTANCE = 10
 
-/** Fixed "now" so the threat-memory window is deterministic in the fixture. */
-const NOW = 1_700_000_000_000
+/** Snapshot-relative "now": buildWorldState stamps Date.now(), so damage evidence shares that clock. */
+const NOW = Date.now()
 
 function selfState(position: Vec3Json, overrides: Partial<SelfState> = {}): SelfState {
   return {
