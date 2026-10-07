@@ -44,6 +44,10 @@ export interface ProtectableGoal {
   status?: string
   protected?: boolean
   core?: boolean
+  optionInstanceId?: string | null
+  optionTemplateId?: string | null
+  semanticOptionInstanceId?: string | null
+  semanticOptionTemplateId?: string | null
 }
 
 /** A goal is protected when the deterministic compiler marked it protected or core. */
@@ -59,6 +63,27 @@ export function isProtectedGoal(goal: ProtectableGoal): boolean {
 /** Optional survival rows may be replaced when a patch changes the recovery route. */
 export function isReplaceableOptionalFoodGoal(goal: ProtectableGoal): boolean {
   return goal.protected !== true && goal.kind === 'collect' && goal.targetItem === 'food'
+}
+
+/**
+ * A restored recovery head is not a durable mission commitment.
+ *
+ * The phase ledger can outlive the state that justified a recovery plan. The
+ * measured p27 shape restored `explore:surface` authored for health=12/food=5
+ * after the live frontier had become iron_pickaxe with four ingots already
+ * held. Treat only the explicitly-typed surface recovery and food row as
+ * replaceable; ordinary restored work keeps the bootstrap-preserve contract.
+ */
+export function isReplaceableRecoveryGoal(goal: ProtectableGoal): boolean {
+  if (isReplaceableOptionalFoodGoal(goal)) return true
+  if (goal.protected === true || goal.core === true || goal.kind !== 'explore') return false
+  const ids = [
+    goal.semanticOptionInstanceId,
+    goal.semanticOptionTemplateId,
+    goal.optionInstanceId,
+    goal.optionTemplateId,
+  ]
+  return ids.some((id) => id === 'explore:surface' || id?.startsWith('explore:surface#') === true)
 }
 
 /**

@@ -59,6 +59,28 @@ const RESTORED_TAIL = queued({
 })
 const RESTORED_LEDGER: GoalQueueSnapshot = { counter: 21, goals: [RESTORED_SMELT, RESTORED_TAIL] }
 
+const RESTORED_SURFACE_RECOVERY = queued({
+  id: 'g5:explore',
+  kind: 'explore',
+  description: 'explore surface terrain',
+  status: 'active',
+  core: false,
+  protected: false,
+  semanticOptionInstanceId: 'explore:surface',
+  optionInstanceId: 'explore:surface',
+})
+const RESTORED_FOOD_RECOVERY = queued({
+  id: 'g6:collect:food',
+  kind: 'collect',
+  description: 'collect food',
+  targetItem: 'food',
+  requiredCount: 8,
+  status: 'pending',
+  core: false,
+  protected: false,
+  semanticOptionInstanceId: 'collect:food#c8',
+})
+
 // The planner ladder for the same moment: it leads with the pickaxe rung,
 // exactly like the live `craft 1 x iron_pickaxe` plan.
 const LADDER: PlannedGoal[] = [
@@ -95,6 +117,28 @@ addCase('(b) the bootstrap ladder is merged BEHIND the restored head, not droppe
     ladderCraftIndex > headIndex &&
     ladderCollectIndex > headIndex
   return { pass, detail: `order=${JSON.stringify(descriptions)}` }
+})
+
+addCase('(b2) a restored typed surface/food recovery does not veto a fresh replace', () => {
+  const ledger: GoalQueueSnapshot = {
+    counter: 6,
+    goals: [RESTORED_SURFACE_RECOVERY, RESTORED_FOOD_RECOVERY],
+  }
+  const { queue, op } = bootstrap(ledger, 'replace')
+  const descriptions = queue.state.goals.map((goal) => goal.description)
+  const pass =
+    op === 'replace' &&
+    queue.current?.description === 'craft 1 x iron_pickaxe' &&
+    !descriptions.includes('explore surface terrain') &&
+    !descriptions.includes('collect food')
+  return { pass, detail: `op=${op} head=${queue.current?.description ?? 'none'} order=${JSON.stringify(descriptions)}` }
+})
+
+addCase('(b3) explicit protection still preserves a surface-shaped restored head', () => {
+  const protectedSurface = { ...RESTORED_SURFACE_RECOVERY, protected: true }
+  const { queue, op } = bootstrap({ counter: 5, goals: [protectedSurface] }, 'replace')
+  const pass = op === 'continue' && queue.current?.id === protectedSurface.id
+  return { pass, detail: `op=${op} head=${queue.current?.id ?? 'none'}` }
 })
 
 addCase('(c) fresh bootstrap (no ledger) still replaces: the ladder becomes the queue', () => {

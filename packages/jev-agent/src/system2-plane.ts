@@ -17,6 +17,7 @@ import type { GroundedFact, JevSemanticProjection, PreviousDecisionFacts, Semant
 import { FatalModelError, ModelRecoveryRequested, describeFailure, failLoud } from './modelFailure.ts'
 import { describePredicate } from './optionSpec.ts'
 import type { OptionWorldSnapshot } from './optionSpec.ts'
+import { isReplaceableRecoveryGoal } from './protectedGoals.ts'
 import { bestToolTier } from './reachability.ts'
 import { formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled } from './replanThrottle.ts'
 import type { ReplanInputs, ReplanThrottle } from './replanThrottle.ts'
@@ -1388,12 +1389,15 @@ export async function bootstrapPlan(host: System2PlaneHost): Promise<void> {
 /**
  * The queue op the single-shot bootstrap plan is actually applied with (moved
  * from controller.ts; semantics in the doc above the function).
- * A restored, not-yet-done queue head is work the bot already committed to,
- * so bootstrap merges the ladder BEHIND it (`continue`); an empty queue keeps
- * the requested op, and an explicit `abort` is never overridden.
+ * A restored, not-yet-done queue head is normally work the bot already
+ * committed to, so bootstrap merges the fresh plan BEHIND it (`continue`).
+ * A typed recovery head is different: it was a temporary answer to an older
+ * body/world state and must not veto a fresh System2 `replace` after the
+ * frontier changes. Protected/core work is never classified as replaceable.
  */
 export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | undefined): PlanOp {
   const op = requested ?? 'replace'
-  if (op === 'replace' && queue.current !== null) return 'continue'
+  const current = queue.current
+  if (op === 'replace' && current !== null && !isReplaceableRecoveryGoal(current)) return 'continue'
   return op
 }
