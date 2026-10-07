@@ -286,17 +286,18 @@ type PathfinderMove = import('mineflayer-pathfinder').Move
  */
 class WadeBoundMovements extends Movements {
   override getNeighbors(node: PathfinderMove): PathfinderMove[] {
-    // Stock diagonal jumps accept the cheaper of the two orthogonal sides.
-    // A rising diagonal sweeps the body through BOTH sides: a solid corner
+    // Stock diagonal moves accept the cheaper of the two orthogonal sides.
+    // Level and rising diagonals sweep the body through BOTH sides: a solid corner
     // produced a successful CAN plan followed by GoalBlock stuck/path_timeout.
     // Keep the existing orthogonal edges so A* can realize the clear side as
     // two legs, without changing the destination or adding dig/place effects.
     const neighbors = super.getNeighbors(node).filter((move) => {
       const dx = move.x - node.x
       const dz = move.z - node.z
-      if (move.y !== node.y + 1 || Math.abs(dx) !== 1 || Math.abs(dz) !== 1) return true
+      const rise = move.y - node.y
+      if ((rise !== 0 && rise !== 1) || Math.abs(dx) !== 1 || Math.abs(dz) !== 1) return true
       const origin = this.bot.entity.position.clone().set(node.x, node.y, node.z)
-      return [1, 2].every((dy) => this.getBlock(origin, dx, dy, 0).safe && this.getBlock(origin, 0, dy, dz).safe)
+      return [rise, rise + 1].every((dy) => this.getBlock(origin, dx, dy, 0).safe && this.getBlock(origin, 0, dy, dz).safe)
     })
     return filterSubmersionDestinations(neighbors, (x, y, z) =>
       this.getBlock({ x, y, z } as never, 0, 0, 0),
