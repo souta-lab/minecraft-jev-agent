@@ -161,6 +161,26 @@ addCase('planNetherPortal expresses the stone -> iron -> diamond pickaxe depende
   return { pass, detail: `ids=[${ids.join(',')}] obsidianRank=${obsidianStep?.kind === 'collect' ? obsidianStep.requiredPickaxeRank : 'n/a'}` }
 })
 
+addCase('portal iron planning sums the separate pickaxe and flint-and-steel consumers', () => {
+  const empty = planNetherPortal({ inventory: {}, toolRank: 0 })
+  const emptyRaw = empty.prerequisites.find((step) => step.capabilityId === 'collect:raw_iron')
+  const emptySmelt = empty.prerequisites.find((step) => step.capabilityId === 'smelt:iron_ingot')
+  const partial = planNetherPortal({ inventory: { iron_ingot: 2, raw_iron: 1 }, toolRank: 0 })
+  const partialRaw = partial.prerequisites.find((step) => step.capabilityId === 'collect:raw_iron')
+  const partialSmelt = partial.prerequisites.find((step) => step.capabilityId === 'smelt:iron_ingot')
+  const quantity = (step: PortalStep | undefined): number | null =>
+    step?.kind === 'collect' || step?.kind === 'smelt' ? step.count : null
+  const pass =
+    quantity(emptyRaw) === 4 &&
+    quantity(emptySmelt) === 4 &&
+    quantity(partialRaw) === 1 &&
+    quantity(partialSmelt) === 2
+  return {
+    pass,
+    detail: `empty raw=${quantity(emptyRaw) ?? 0} smelt=${quantity(emptySmelt) ?? 0}; partial raw=${quantity(partialRaw) ?? 0} smelt=${quantity(partialSmelt) ?? 0}`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 3. frame shape validation
 // ---------------------------------------------------------------------------

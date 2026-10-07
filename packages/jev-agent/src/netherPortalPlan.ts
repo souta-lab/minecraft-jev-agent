@@ -1988,7 +1988,10 @@ export function planNetherPortal(input: NetherPortalPlanInput): NetherPortalPlan
 
   const ironNeededForPickaxe = hasIronPickaxe ? 0 : 3
   const ironNeededForSteel = flintAndSteel < 1 ? 1 : 0
-  const ironIngotsNeeded = Math.max(ironNeededForPickaxe, ironNeededForSteel)
+  // These are distinct crafted tools with separate iron inputs: an absent
+  // iron pickaxe consumes three ingots and an absent flint-and-steel consumes
+  // one more. Use the joint cost, not the largest individual consumer.
+  const ironIngotsNeeded = ironNeededForPickaxe + ironNeededForSteel
   const ironShortfall = Math.max(0, ironIngotsNeeded - ironIngots)
   const rawIronNeeded = Math.max(0, ironShortfall - rawIron)
 
