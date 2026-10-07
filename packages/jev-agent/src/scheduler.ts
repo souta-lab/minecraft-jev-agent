@@ -277,8 +277,11 @@ export function shouldDeferTriggerDuringSurvivalShapingLease(
   health = Number.POSITIVE_INFINITY,
   criticalHealth = 6,
   absorbedHits = 0,
+  foodAccessAscent = false,
 ): boolean {
-  if (!isSurvivalShapingActionId(actionId)) return false
+  // A grounded surface-access ascent can already be the selected response
+  // for a food-empty body. It shares the same finite lease/hit bounds.
+  if (!isSurvivalShapingActionId(actionId) && !foodAccessAscent) return false
   if (trigger === 'survival_reground') return true
   return (
     (trigger === 'damage_taken' || trigger === 'hp_changed') &&

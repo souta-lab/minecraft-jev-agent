@@ -494,6 +494,7 @@ function retrieveCandidate(target: Vec3Json): Candidate {
 interface WalkRun {
   result: ExecutionResult
   commitmentBudgetMs: number | null
+  surfaceAccessAscent: boolean
   selectedBy: string | null
   position: Vec3
   trace: string[]
@@ -634,6 +635,7 @@ async function runWalk(
   const claim = executor.claim(candidate, claimContext)
   const selectedBy = executor.current?.commitment?.selectedBy ?? null
   const commitmentBudgetMs = executor.current?.commitment?.budget.ms ?? null
+  const surfaceAccessAscent = executor.current?.commitment?.params.surfaceAccessAscent === true
   const result = await claim.completion
   const elapsedMs = Date.now() - startedAt
   const rows = (await Bun.file(join(dir, 'agent.jsonl')).text())
@@ -649,6 +651,7 @@ async function runWalk(
   return {
     result,
     commitmentBudgetMs,
+    surfaceAccessAscent,
     selectedBy,
     position: fixture.position,
     trace: fixture.trace,
@@ -1189,6 +1192,7 @@ const cell = (p: Vec3Json): string => `${Math.floor(p.x)},${Math.floor(p.y)},${M
     vertical: 'staircase-up', upDir: 'E', upFromY: 64, upToY: 65,
     upDigX: 5, upDigY: 65, upDigZ: 0,
     upStepX: 5, upStepY: 65, upStepZ: 0,
+    prerequisiteRole: 'surface_access',
   }
   const run = await runWalk(start, grid, candidate, {
     actuation: 'pathfinder', pathfinderPhysics: true,
@@ -1207,8 +1211,14 @@ const cell = (p: Vec3Json): string => `${Math.floor(p.x)},${Math.floor(p.y)},${M
       `target=${cell(target)} elapsed=${run.elapsedMs}ms ends=${run.ends.join(';')}`,
   )
   check(
+    '(food access lease) the executor binds the selected grounded upward purpose',
+    run.surfaceAccessAscent,
+    'surface_access MOVE with a higher target -> commitment fact',
+  )
+  const ordinary = await runWalk(target, grid, moveCandidate(target), { pathTimeoutMs: 1_000 })
+  check(
     '(route budget) ordinary walk time remains its original declaration',
-    (await runWalk(target, grid, moveCandidate(target), { pathTimeoutMs: 1_000 })).commitmentBudgetMs === 1_000,
+    ordinary.commitmentBudgetMs === 1_000 && !ordinary.surfaceAccessAscent,
     'no staircase dig declaration -> no additional dig allowance',
   )
 }

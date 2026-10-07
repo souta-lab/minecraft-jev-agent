@@ -2909,6 +2909,14 @@ export class Executor {
         toolName: candidate.toolName,
         goalDrop: readMetaString(candidate, 'goalDrop'),
         columnDescent: candidate.meta.columnDescent === true,
+        // Preserve the grounded purpose of the selected upward route for
+        // bounded trigger deferral; an ASCEND id alone is not evidence.
+        ...(candidate.kind === 'MOVE' &&
+          readMetaString(candidate, 'prerequisiteRole') === 'surface_access' &&
+          candidate.target !== null &&
+          candidate.target.y > Math.floor(this.bot.entity.position.y)
+          ? { surfaceAccessAscent: true }
+          : {}),
       },
     })
   }

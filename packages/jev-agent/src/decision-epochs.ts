@@ -1305,9 +1305,12 @@ export function requestDecision(host: DecisionEpochsHost, trigger: DecisionTrigg
       )
       return
     }
-    // An escape pillar or threat wall is the selected survival answer: the
-    // damage landing while it builds must not cancel the build every swing.
-    if (shouldDeferTriggerDuringSurvivalShapingLease(trigger, inFlight.id, host.bot.health, CRITICAL_COMBAT_HEALTH, absorbedHits)) {
+    // Preserve an already selected escape shape or grounded food-access
+    // ascent within the existing hit budget and critical-health boundary.
+    if (shouldDeferTriggerDuringSurvivalShapingLease(
+      trigger, inFlight.id, host.bot.health, CRITICAL_COMBAT_HEALTH, absorbedHits,
+      host.bot.food <= 0 && inFlight.commitment?.params.surfaceAccessAscent === true,
+    )) {
       if (trigger === 'damage_taken' || trigger === 'hp_changed') {
         leaseAbsorbedHits.set(inFlight, absorbedHits + 1)
       }
