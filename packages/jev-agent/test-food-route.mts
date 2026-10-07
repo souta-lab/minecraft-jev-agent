@@ -236,6 +236,17 @@ function animal(name: string, distance: number, id = 42): Record<string, unknown
   }
 }
 
+function hostile(name: string, distance: number, id: number): Record<string, unknown> {
+  return {
+    id,
+    name,
+    kind: 'HostileMob',
+    username: undefined,
+    position: new Vec3(ORIGIN.x + distance, ORIGIN.y, ORIGIN.z),
+    isValid: true,
+  }
+}
+
 addCase('(a1) starving + sensed cow at 12m: a grounded hunt route is offered', () => {
   const state = perceive({ counts: {}, food: 0, health: 1, entities: [animal('cow', 12)], blocks: FLOOR })
   const result = grounded(state)
@@ -243,6 +254,36 @@ addCase('(a1) starving + sensed cow at 12m: a grounded hunt route is offered', (
   return {
     pass: hunt !== undefined && hunt.kind === 'ATTACK' && hunt.meta.foodTarget === 'cow',
     detail: `routes=[${foodRoutes(result.candidates).join(',')}] hunt=${hunt?.id ?? 'none'}`,
+  }
+})
+
+addCase('(a1c) four nearby hostiles cannot crowd a sensed food animal out of the local reaction budget', () => {
+  const entities = [
+    hostile('zombie', 1, 100),
+    hostile('zombie', 2, 101),
+    hostile('zombie', 3, 102),
+    hostile('zombie', 4, 103),
+    animal('chicken', 12, 42),
+  ]
+  const state = perceive({ counts: {}, food: 0, health: 1, entities, blocks: FLOOR })
+  const result = grounded(state)
+  const attacks = [
+    ...result.candidates,
+    ...result.withheld.map((entry) => entry.candidate),
+  ].filter((candidate) => candidate.kind === 'ATTACK')
+  const foodHunt = attacks.find((candidate) => candidate.targetEntityId === 42)
+  const localHostileIds = new Set(
+    attacks
+      .filter((candidate) => [100, 101, 102, 103].includes(candidate.targetEntityId ?? -1))
+      .map((candidate) => candidate.targetEntityId),
+  )
+  return {
+    pass:
+      foodHunt?.meta.foodRoute === 'animal' &&
+      foodHunt.meta.foodTarget === 'chicken' &&
+      localHostileIds.size === 4,
+    detail: `attackIds=[${attacks.map((candidate) => candidate.id).join(',')}] food=${foodHunt?.id ?? 'none'} ` +
+      `foodRoute=${String(foodHunt?.meta.foodRoute)} hostileCount=${localHostileIds.size}`,
   }
 })
 

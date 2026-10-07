@@ -5163,14 +5163,14 @@ function generateRawCandidates(
   // not a semantically preferred occupant of that budget. Keeping the two sets
   // independent prevents code from deciding WHICH by crowding either a safety
   // threat or a goal producer out of Jev's candidate set.
+  const boundedLocalHostiles = localHostiles.slice(0, options.maxAttackCandidates)
   const seenAttackIds = new Set<number>()
-  const attackTargets = [...localHostiles, ...huntTargets]
+  const attackTargets = [...boundedLocalHostiles, ...huntTargets]
     .filter((entity) => {
       if (seenAttackIds.has(entity.id)) return false
       seenAttackIds.add(entity.id)
       return true
     })
-    .slice(0, options.maxAttackCandidates)
   for (const producer of goalDropTargets) {
     if (seenAttackIds.has(producer.id)) continue
     seenAttackIds.add(producer.id)
