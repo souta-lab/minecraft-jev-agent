@@ -2,6 +2,8 @@
 // then being selected again before its ordinary failure cooldown.
 import { guardMoveFailureReason } from './src/controller.ts'
 import { filterBlacklistedMoves, MoveFailMemory } from './src/moveFailMemory.ts'
+import { recordMoveFailure } from './src/outcome-ledgers.ts'
+import type { OutcomeLedgersHost } from './src/outcome-ledgers.ts'
 import { createPositionFactCache } from './src/positionFactCache.ts'
 
 let failures = 0
@@ -82,5 +84,45 @@ check(
     `retained=${afterThresholdFilter.kept.some((candidate) => candidate.id === 'MOVE:b98_67_78')}`,
 )
 
-process.stdout.write(`\n${4 - failures}/4 move-path-refusal cases passed\n`)
+// p27: a settled RETREAT path_stuck was immediately re-offered as MOVE at the
+// same cell. Preserve that exact-cell refusal across candidate kinds only while
+// body cell, world revision, and generation still match; leave alternatives live.
+const p27Memory = new MoveFailMemory({ failureLimit: 3, cooldownMs: 30_000, now: () => now })
+const p27Target = { x: 7190, y: 14, z: 1269 }
+const p27Scope = { origin: { x: 7191, y: 14, z: 1268 }, worldRevision: 104, generationId: 'gen-p27' }
+const p27Host = {
+  currentDimension: () => 'overworld',
+  movePathFailureScope: () => p27Scope,
+  moveFailMemory: p27Memory,
+  logger: { warn: () => {} },
+  tickCounter: 1,
+  notifyMoveFailureMemory: () => {},
+} as unknown as OutcomeLedgersHost
+recordMoveFailure(p27Host, {
+  id: 'RETREAT:p7190_14_1269', kind: 'RETREAT', target: p27Target,
+} as Parameters<typeof recordMoveFailure>[1], 'stuck')
+const p27Offer = [
+  { id: 'RETREAT:p7190_14_1269', kind: 'RETREAT', target: p27Target },
+  { id: 'MOVE:p7190_14_1269', kind: 'MOVE', target: p27Target },
+  { id: 'MOVE:p7189_15_1269', kind: 'MOVE', target: { x: 7189, y: 15, z: 1269 } },
+  { id: 'WAIT', kind: 'WAIT', target: null },
+]
+const p27Same = filterBlacklistedMoves(p27Offer, p27Memory, 'overworld', p27Scope)
+const p27Restored = new MoveFailMemory({ now: () => now, initialEntries: p27Memory.snapshot() })
+const p27ChangedOrigin = filterBlacklistedMoves(p27Offer, p27Restored, 'overworld', {
+  ...p27Scope,
+  origin: { x: 7192, y: 15, z: 1268 },
+})
+check(
+  'p27 settled path_stuck suppresses the same cell across RETREAT/MOVE, but preserves other routes and invalidates on movement',
+  p27Same.kept.map((candidate) => candidate.id).join(',') === 'MOVE:p7189_15_1269,WAIT' &&
+    p27Same.skipped.length === 2 &&
+    p27Restored.isBlacklisted('overworld', p27Target, p27Scope) &&
+    p27ChangedOrigin.kept.some((candidate) => candidate.id === 'MOVE:p7190_14_1269'),
+  `sameScopeKept=${p27Same.kept.map((candidate) => candidate.id).join(',')} ` +
+    `skipped=${p27Same.skipped.length} restored=${p27Restored.isBlacklisted('overworld', p27Target, p27Scope)} ` +
+    `movedOriginReoffered=${p27ChangedOrigin.kept.some((candidate) => candidate.id === 'MOVE:p7190_14_1269')}`,
+)
+
+process.stdout.write(`\n${5 - failures}/5 move-path-refusal cases passed\n`)
 process.exit(failures === 0 ? 0 : 1)

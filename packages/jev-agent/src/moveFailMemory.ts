@@ -31,6 +31,7 @@ export interface Vec3Like {
 }
 
 export type MoveFailureReason = 'unreachable' | 'stuck' | 'no_path' | 'no_progress'
+export type MovePathRefusalReason = Extract<MoveFailureReason, 'stuck' | 'no_path'>
 
 export interface MoveFailEntry {
   key: string
@@ -52,11 +53,11 @@ export interface MoveFailEntry {
    */
   oscillationStrikes?: number
   /**
-   * A pathfinder/guard NO_PATH is immediately reusable while the body remains
-   * in this cell and the observed world revision is unchanged. Unlike the
-   * bounded cooldown, this is a state-conditioned mechanical fact: moving the
-   * body, mutating the world, or starting a new resident generation invalidates
-   * it.
+   * A pathfinder/guard NO_PATH or settled path_stuck is immediately reusable
+   * while the body remains in this cell and the observed world revision is
+   * unchanged. Unlike the bounded cooldown, this is a state-conditioned
+   * mechanical fact: moving the body, mutating the world, or starting a new
+   * resident generation invalidates it.
    */
   pathFailureScope?: MoveFailurePathScope
 }
@@ -310,6 +311,7 @@ export class MoveFailMemory {
       const blacklistedUntil = Number.isFinite(source.blacklistedUntil) ? Math.max(0, source.blacklistedUntil) : 0
       const sourceScope = source.pathFailureScope
       const pathFailureScope =
+        (lastReason === 'no_path' || lastReason === 'stuck') &&
         sourceScope !== undefined &&
         sourceScope !== null &&
         typeof sourceScope === 'object' &&
@@ -400,17 +402,18 @@ export class MoveFailMemory {
   }
 
   /**
-   * Record a NO_PATH and suppress this destination immediately for the same
-   * body cell, world revision, and resident generation. The ordinary failure
-   * threshold/cooldown remains the fallback when that complete witness changes
-   * or is unavailable.
+   * Record a settled path refusal and suppress this destination immediately for
+   * the same body cell, world revision, and resident generation. The ordinary
+   * failure threshold/cooldown remains the fallback when that complete witness
+   * changes or is unavailable.
    */
   recordPathFailure(
     dimension: string,
     position: Vec3Like,
     scope: MoveFailurePathScope,
+    reason: MovePathRefusalReason = 'no_path',
   ): MoveFailRecordResult {
-    const result = this.record(dimension, position, 'no_path')
+    const result = this.record(dimension, position, reason)
     result.entry.pathFailureScope = {
       origin: moveFailureCell(scope.origin),
       worldRevision: scope.worldRevision,
@@ -466,7 +469,7 @@ export class MoveFailMemory {
     const pathFactStillApplies =
       scope !== undefined &&
       scope !== null &&
-      entry.lastReason === 'no_path' &&
+      (entry.lastReason === 'no_path' || entry.lastReason === 'stuck') &&
       entry.pathFailureScope !== undefined &&
       entry.pathFailureScope.worldRevision === scope.worldRevision &&
       entry.pathFailureScope.generationId === scope.generationId &&

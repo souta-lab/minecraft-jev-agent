@@ -774,11 +774,11 @@ export function rememberMoveTarget(host: OutcomeLedgersHost, candidate: Candidat
 export function recordMoveFailure(host: OutcomeLedgersHost, candidate: Candidate, reason: MoveFailureReason): void {
   if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
   const dimension = host.currentDimension()
-  const pathFailureScope = reason === 'no_path' ? host.movePathFailureScope() : null
-  const result =
-    pathFailureScope === null
-      ? host.moveFailMemory.record(dimension, candidate.target, reason)
-      : host.moveFailMemory.recordPathFailure(dimension, candidate.target, pathFailureScope)
+  const pathRefusalReason = reason === 'no_path' || reason === 'stuck' ? reason : null
+  const pathFailureScope = pathRefusalReason === null ? null : host.movePathFailureScope()
+  const result = pathFailureScope === null || pathRefusalReason === null
+    ? host.moveFailMemory.record(dimension, candidate.target, reason)
+    : host.moveFailMemory.recordPathFailure(dimension, candidate.target, pathFailureScope, pathRefusalReason)
   const key = moveFailureKey(dimension, candidate.target)
   host.logger.warn(
     'agent',
