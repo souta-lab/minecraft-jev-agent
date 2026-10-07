@@ -254,6 +254,32 @@ const NOW = 1_700_000_000_000
     CRITICAL_DAMAGE_KINDS.has('RETREAT') && CRITICAL_DAMAGE_KINDS.has('MOVE') && CRITICAL_DAMAGE_KINDS.has('EAT'),
     `kinds=[${[...CRITICAL_DAMAGE_KINDS].join(' ')}]`,
   )
+
+  const mandatoryLocal: Candidate = {
+    id: 'CRAFT:iron_pickaxe',
+    kind: 'CRAFT',
+    meta: { localMandatoryCraftRecovery: true },
+  } as unknown as Candidate
+  const ordinaryCraft: Candidate = {
+    id: 'CRAFT:chest',
+    kind: 'CRAFT',
+    meta: {},
+  } as unknown as Candidate
+  const floorOffer = restrictCandidatesDuringCriticalDamage(
+    { signals: {} as AgentSignals, self: { food: 0, health: 1 } as unknown as SelfState },
+    [set[0]!, mandatoryLocal, ordinaryCraft],
+  )
+  const aboveFloorOffer = restrictCandidatesDuringCriticalDamage(
+    { signals: {} as AgentSignals, self: { food: 0, health: 5 } as unknown as SelfState },
+    [set[0]!, mandatoryLocal, ordinaryCraft],
+  )
+  check(
+    '(c2) at the starvation floor only a typed local mandatory craft may coexist with rescue routes',
+    floorOffer.some((candidate) => candidate.id === mandatoryLocal.id) &&
+      !floorOffer.some((candidate) => candidate.id === ordinaryCraft.id) &&
+      !aboveFloorOffer.some((candidate) => candidate.id === mandatoryLocal.id),
+    `floor=[${floorOffer.map((candidate) => candidate.id).join(' ')}] above=[${aboveFloorOffer.map((candidate) => candidate.id).join(' ')}]`,
+  )
 }
 
 // ---------------------------------------------------------------------------

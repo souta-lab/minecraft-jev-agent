@@ -865,7 +865,7 @@ function guardPlace(candidate: Candidate, state: WorldState, context: GuardConte
   // is a first-class survival affordance - and a smelter placement that can
   // cook a held ingredient is a starvation route. The offer side shares the
   // same `starvingDeniedPlace` rule, so a denied placement is never offered.
-  if (starvingDeniedPlace(state, itemName)) {
+  if (starvingDeniedPlace(state, itemName, candidate.meta.localMandatoryCraftRecovery === true)) {
     return deny(
       candidate.id,
       'STARVING',

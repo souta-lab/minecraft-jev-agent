@@ -1685,12 +1685,26 @@ export function ensureCraftStepActionable(
   candidates: readonly Candidate[],
   options: CandidateOptions,
 ): Candidate[] {
-  if (candidates.some(isProductiveCandidate)) return [...candidates]
   const current = state.goalQueue?.current ?? null
   if (current === null || current.kind !== 'craft') return [...candidates]
-  const seen = new Set(candidates.map((candidate) => candidate.id))
-  const step = selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id))
-  return step.length === 0 ? [...candidates] : [...candidates, ...step]
+  const selfContained = selfContainedCraftCandidates(state, options)
+  const localMandatoryIds = new Set(
+    selfContained
+      .filter((candidate) => candidate.meta.localMandatoryCraftRecovery === true)
+      .map((candidate) => candidate.id),
+  )
+  // The raw generator may already have emitted the exact self-contained step.
+  // Preserve its original grounding facts while stamping the same typed
+  // current-goal identity the fallback copy carries.
+  const stamped = candidates.map((candidate) =>
+    localMandatoryIds.has(candidate.id)
+      ? { ...candidate, meta: { ...candidate.meta, localMandatoryCraftRecovery: true } }
+      : candidate,
+  )
+  if (stamped.some(isProductiveCandidate)) return stamped
+  const seen = new Set(stamped.map((candidate) => candidate.id))
+  const step = selfContained.filter((candidate) => !seen.has(candidate.id))
+  return step.length === 0 ? stamped : [...stamped, ...step]
 }
 
 /** Capability name for one unmet predicate, used in the `precondition:<cause>` blockedBy. */

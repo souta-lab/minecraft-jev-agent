@@ -28,6 +28,7 @@ import {
 import type { Candidate, CandidateOptions, PlaceRefusal } from './src/candidates.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
+import { guardCandidate } from './src/policy.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, BlockState, GoalState, HeadroomCut, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -42,7 +43,7 @@ const require = createRequire(import.meta.url)
 const recipeIndex = createRecipeIndex(require('minecraft-data')('1.21.11'))
 const options: CandidateOptions = { ...defaultCandidateOptions, recipes: recipeIndex }
 
-function self(position: Vec3Json): SelfState {
+function self(position: Vec3Json, overrides: Partial<SelfState> = {}): SelfState {
   return {
     username: 'AI_PLACESPOT',
     position,
@@ -56,6 +57,7 @@ function self(position: Vec3Json): SelfState {
     dimension: 'overworld',
     isDay: true,
     heldItem: null,
+    ...overrides,
   }
 }
 
@@ -124,12 +126,17 @@ function worldState(overrides: {
   headroomCuts?: HeadroomCut[]
   blocks?: BlockState[]
   goalQueue?: GoalQueueState
+  health?: number
+  food?: number
 }): WorldState {
   return {
     schemaVersion: 1,
     tick: 9,
     timestampMs: 1_700_000_000_000,
-    self: self(overrides.position),
+    self: self(overrides.position, {
+      ...(overrides.health === undefined ? {} : { health: overrides.health }),
+      ...(overrides.food === undefined ? {} : { food: overrides.food }),
+    }),
     inventory: overrides.inventory ?? inventory({}),
     entities: [],
     blocks: overrides.blocks ?? [],
@@ -141,7 +148,7 @@ function worldState(overrides: {
     stepCuts: [],
     headroomCuts: overrides.headroomCuts ?? [],
     goal: goal('stone_pickaxe'),
-    goalQueue: queueWith(craftGoal('stone_pickaxe')),
+    goalQueue: overrides.goalQueue ?? queueWith(craftGoal('stone_pickaxe')),
     recentEvents: [],
     signals: overrides.signals ?? signals(),
   }
@@ -200,6 +207,48 @@ const productive = (candidates: readonly Candidate[]): Candidate[] =>
     '(1) the tray stays off the feet cell (the bot body would intersect it)',
     !placeIds(grounded.candidates).includes(`PLACE:crafting_table:${blockId('p', feet)}`),
     `placeIds=[${placeIds(grounded.candidates).join(',')}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (1a-floor) mandatory local station recovery survives the starvation floor
+// ---------------------------------------------------------------------------
+{
+  const neighbour: Vec3Json = { x: 2, y: 64, z: 0 }
+  const state = heldTableInTunnel([neighbour], { health: 1, food: 0 })
+  const ladder = selfContainedCraftCandidates(state, options)
+  const place = ladder.find((candidate) => candidate.kind === 'PLACE')
+  const guard =
+    place === undefined
+      ? null
+      : guardCandidate(place, state, {
+          phase: 'decision',
+          candidateIds: new Set([place.id]),
+          inFlight: null,
+          reach: options.reach,
+          maxCandidateAgeTicks: 40,
+        })
+  check(
+    '(1a-floor) health1/food0 mandatory self-contained table placement is typed and guard-admitted',
+    place !== undefined &&
+      place.meta.localMandatoryCraftRecovery === true &&
+      guard !== null &&
+      guard.ok === true,
+    `place=${place?.id ?? 'none'} marker=${String(place?.meta.localMandatoryCraftRecovery ?? false)} guard=${guard === null ? 'none' : guard.ok ? 'ok' : guard.code}`,
+  )
+
+  const optional = craftGoal('stone_pickaxe')
+  optional.optional = true
+  const optionalState = heldTableInTunnel([neighbour], {
+    health: 1,
+    food: 0,
+    goalQueue: queueWith(optional),
+  })
+  const optionalStep = selfContainedCraftCandidates(optionalState, options).find((candidate) => candidate.kind === 'PLACE')
+  check(
+    '(1a-floor) an optional craft does not receive the mandatory-recovery exemption',
+    optionalStep === undefined || optionalStep.meta.localMandatoryCraftRecovery !== true,
+    `optional=${optionalStep?.id ?? 'none'} marker=${String(optionalStep?.meta.localMandatoryCraftRecovery ?? false)}`,
   )
 }
 

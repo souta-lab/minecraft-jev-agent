@@ -1382,7 +1382,21 @@ export function restrictCandidatesDuringCriticalDamage(
   const evidence = state.signals.criticalDamage ?? null
   if (evidence?.active !== true && !bodyStarving(state.self)) return [...candidates]
   const rescue = damageEndingCandidates(candidates)
-  return rescue.length > 0 ? rescue : [...candidates]
+  if (rescue.length === 0) return [...candidates]
+  // Normal difficulty starvation bottoms out at 1 HP. Once the body is already
+  // at that floor, a bounded local step mechanically derived from the CURRENT
+  // mandatory craft goal may coexist with the real rescue routes. This does not
+  // turn arbitrary CRAFT/PLACE work back on: only the typed self-contained
+  // current-goal step is admitted, and above the floor the old restriction is
+  // unchanged.
+  const localMandatoryRecovery =
+    state.self.health <= 1
+      ? candidates.filter((candidate) => candidate.meta.localMandatoryCraftRecovery === true)
+      : []
+  if (localMandatoryRecovery.length === 0) return rescue
+  const kept = new Map(rescue.map((candidate) => [candidate.id, candidate]))
+  for (const candidate of localMandatoryRecovery) kept.set(candidate.id, candidate)
+  return [...kept.values()]
 }
 
 // ---------------------------------------------------------------------------
@@ -4362,8 +4376,18 @@ export function hasSmeltableFoodIngredient(state: WorldState): boolean {
  * legal. The offer side and the execution guard share this rule, so a denied
  * placement is never offered to the decision plane.
  */
-export function starvingDeniedPlace(state: WorldState, itemName: string | null): boolean {
+export function starvingDeniedPlace(
+  state: WorldState,
+  itemName: string | null,
+  localMandatoryCraftRecovery: boolean = false,
+): boolean {
   if (itemName === null || !bodyStarving(state.self)) return false
+  // At this server's Normal-difficulty starvation floor (1 HP), hunger itself
+  // cannot lower the body further. A station placement that is the mechanically
+  // derived next step of the CURRENT mandatory craft goal is therefore allowed
+  // to coexist with food/escape routes: it is bounded local capability recovery,
+  // not arbitrary work. Above the floor the old survival restriction remains.
+  if (localMandatoryCraftRecovery && state.self.health <= 1) return false
   if (!CRAFT_STATIONS.has(itemName) && !FURNACE_STATIONS.has(itemName) && containerBlockForItem(itemName) === null) return false
   return !(itemName === 'furnace' && hasSmeltableFoodIngredient(state)) && !(itemName === 'smoker' && hasSmeltableFoodIngredient(state))
 }
@@ -8654,8 +8678,9 @@ function placeStationCandidate(
   item: string,
   spot: Vec3Json,
   purpose: string,
+  localMandatoryCraftRecovery: boolean = false,
 ): Candidate | null {
-  if (starvingDeniedPlace(state, item)) return null
+  if (starvingDeniedPlace(state, item, localMandatoryCraftRecovery)) return null
   return {
     id: `PLACE:${item}:${blockId('p', spot)}`,
     kind: 'PLACE',
@@ -8668,7 +8693,14 @@ function placeStationCandidate(
     toolName: null,
     inReach: distance(spot, state.self.eyePosition) <= options.reach,
     hasStandableAdjacent: true,
-    meta: { tick: state.tick, x: spot.x, y: spot.y, z: spot.z, purpose },
+    meta: {
+      tick: state.tick,
+      x: spot.x,
+      y: spot.y,
+      z: spot.z,
+      purpose,
+      ...(localMandatoryCraftRecovery ? { localMandatoryCraftRecovery: true } : {}),
+    },
   }
 }
 
@@ -9265,6 +9297,7 @@ function craftPlanStepCandidate(
   options: CandidateOptions,
   op: CraftOp,
   focusItem: string,
+  localMandatoryCraftRecovery: boolean = false,
 ): CraftStep {
   if (op.type === 'craft') {
     const table = op.requiresTable ? state.craftingTables.find(isSensedStation) ?? null : null
@@ -9288,6 +9321,7 @@ function craftPlanStepCandidate(
           craftItem: op.item,
           craftCount: op.count,
           requiresTable: op.requiresTable,
+          ...(localMandatoryCraftRecovery ? { localMandatoryCraftRecovery: true } : {}),
         },
       },
       refusal: null,
@@ -9297,7 +9331,14 @@ function craftPlanStepCandidate(
   const placement = heldStationPlacement(state, options, op.item, `craft ${focusItem}`)
   if (placement.spot !== null) {
     return {
-      candidate: placeStationCandidate(state, options, op.item, placement.spot, `craft ${focusItem}`),
+      candidate: placeStationCandidate(
+        state,
+        options,
+        op.item,
+        placement.spot,
+        `craft ${focusItem}`,
+        localMandatoryCraftRecovery,
+      ),
       refusal: null,
     }
   }
@@ -9333,7 +9374,8 @@ export function selfContainedCraftCandidates(
   )
   if (plan.op === null) return []
   if (planStepCraftsKnownStation(state, options, plan.op)) return []
-  const step = craftPlanStepCandidate(state, options, plan.op, focusItem)
+  const localMandatoryCraftRecovery = current?.optional !== true
+  const step = craftPlanStepCandidate(state, options, plan.op, focusItem, localMandatoryCraftRecovery)
   return step.candidate === null ? [] : [step.candidate]
 }
 
