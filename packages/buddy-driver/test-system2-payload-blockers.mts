@@ -299,7 +299,8 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
 }
 
 // ---------------------------------------------------------------------------
-// (i2) a directly executable frontier recipe is visible to fresh System2 WHAT
+// (i2) a directly executable frontier remains visible alongside critical
+// starvation facts when fresh System2 WHAT is requested.
 // ---------------------------------------------------------------------------
 
 {
@@ -313,22 +314,74 @@ function collector(): { lines: LogLine[]; log: (event: string, detail?: Record<s
     ...liveRequest(),
     goalQueueState: { depth: 0, current: null, empty: true, hasImpossible: false, done: 0, goals: [] },
   }
+  const starvingBot = {
+    inventory: {
+      items: () => [
+        { name: 'iron_ingot', count: 4 },
+        { name: 'stick', count: 4 },
+        { name: 'spruce_planks', count: 3 },
+        { name: 'spruce_log', count: 1 },
+      ],
+    },
+    entity: { position: { x: 7188.5, y: 18, z: 1267.5 } },
+    game: { dimension: 'minecraft:overworld' },
+    health: 1,
+    food: 0,
+  } as unknown as Bot
+  const starvationBlockers: System2BlockerFacts = {
+    // Match the live p27 summon shape: no food route was offered, while
+    // unrelated hostile actions were withheld for lack of an ascent plan.
+    // The goal-level blocker makes the typed payload present so this regression
+    // can assert the exact alternatives the model actually received.
+    blockedBy: 'no_productive_action',
+    missing: ['ascend_plan'],
+    withheld: [
+      {
+        candidate: 'ATTACK:zombie@7189,18,1268',
+        kind: 'ATTACK',
+        reason: 'needs_ascend',
+        missing: ['ascend_plan'],
+        suppressed: true,
+      },
+    ],
+    tools: { held: [], unmet: [] },
+    alternatives: {
+      presented: [
+        { candidate: 'CRAFT:spruce_planks', kind: 'CRAFT' },
+        { candidate: 'MOVE:p7188_17_1268', kind: 'MOVE' },
+        { candidate: 'MINE:b7188_20_1266', kind: 'MINE' },
+        { candidate: 'DESCEND:level:E:b7189_18_1267', kind: 'DESCEND' },
+      ],
+    },
+  }
+  const starvationRequest = { ...emptyRequest, blockers: starvationBlockers }
   const withOpportunity = buildMercurySummary(
-    liveBot(),
+    starvingBot,
     liveWorld(),
-    emptyRequest,
+    starvationRequest,
     'no_candidate',
     null,
     undefined,
     frontierOpportunity,
   )
-  const withoutOpportunity = buildMercurySummary(liveBot(), liveWorld(), emptyRequest, 'no_candidate')
+  const withoutOpportunity = buildMercurySummary(starvingBot, liveWorld(), starvationRequest, 'no_candidate')
   check(
-    '(i2) the directly executable frontier recipe is exposed as evidence, not a queue choice',
+    '(i2) the starving empty-queue summon preserves its directly executable frontier and actual offered alternatives',
     JSON.stringify(withOpportunity.frontierOpportunity) === JSON.stringify(frontierOpportunity) &&
       withOpportunity.queue.current === null &&
+      withOpportunity.health === 1 && withOpportunity.food === 0 &&
+      withOpportunity.starvation?.startsWith('BODY_STARVING') === true &&
+      withOpportunity.alternatives?.presented.some((entry) => entry.candidate === 'CRAFT:spruce_planks') === true &&
+      withOpportunity.alternatives?.presented.every((entry) => !/food/iu.test(entry.candidate)) === true &&
       withoutOpportunity.frontierOpportunity === undefined,
-    JSON.stringify({ opportunity: withOpportunity.frontierOpportunity, queue: withOpportunity.queue }),
+    JSON.stringify({
+      opportunity: withOpportunity.frontierOpportunity,
+      queue: withOpportunity.queue,
+      health: withOpportunity.health,
+      food: withOpportunity.food,
+      starvation: withOpportunity.starvation,
+      alternatives: withOpportunity.alternatives?.presented,
+    }),
   )
   check(
     '(i2) the cache key changes when the frontier opportunity changes',

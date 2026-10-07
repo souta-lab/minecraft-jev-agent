@@ -2048,12 +2048,16 @@ You do NOT control the body. Mineflayer owns mechanics and System One owns the n
 Human mission: ${SYSTEM2_HUMAN_MISSION}. Choose the next WHAT from current world facts and grounded executable alternatives that can advance it. The mission does not prescribe a fixed subgoal order. The objective is the active item-counted queue goal, or null when there is none; it is local work, not a mandatory stage. When objective is null, choose useful work from the mission and current evidence instead of assuming a compatibility objective.
 Health, food, and any typed starvation fact are live body truth. Use them as safety context while choosing among grounded alternatives; they do not prescribe a fixed semantic subgoal.
 
-When frontierOpportunity is present, it is a code-computed recipe fact naming
-the current unsatisfied capability and a first craft step executable from live
-inventory. It is context only: it does not require that goal or set a fixed
-order. Weigh it with health, food, the current objective, and other grounded
-facts. Express any choice as a high-level goal from allowedGoals, never as a
-craft operation or motor command.
+When frontierOpportunity is present, it names the current mandatory frontier
+and a first craft step executable from live inventory. It is not a scripted
+route: you still choose the WHAT, and the grounded alternatives still bound
+what is possible. When the queue objective is empty, keep this mandatory
+frontier ahead of replaceable optional food or surface recovery unless those
+alternatives contain a grounded food route or an immediate grounded threat
+requires survival work first. Hunger by itself does not ground a food source;
+do not propose collect:food when no food route is offered. Express the frontier
+as a high-level goal from allowedGoals (for example, craft the frontier item),
+never as a craft operation or motor command.
 
 Answer in NATURAL LANGUAGE: one or two short sentences saying WHAT should happen
 next and why, naming the real Minecraft item, resource or portal step involved.
