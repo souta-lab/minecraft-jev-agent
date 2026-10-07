@@ -1002,8 +1002,12 @@ export type DescentOption = {
    * step physically un-enterable even though every individual dig was legal -
    * the measured live failure (`PATH_CALLBACK ... outcome=noPath` then `stuck`
    * on every cardinal step, each dig followed by a silent heading switch).
-   * `head` is deliberately NOT part of a `down` step: the body never stands at
-   * the current feet level inside the front column.
+   * `head` IS part of a `down` step whenever it is solid: the move enters the
+   * front column at feet level before the drop, so the body's upper half
+   * transits `head` even though it never *stands* there. Leaving a solid head
+   * cell un-dug makes the step physically un-enterable (measured live:
+   * `WALL_ENTRY:down` cleared wall+floor then `packet locomotion blocked` on
+   * the untouched head cell above the wall).
    */
   digs?: DescentDigRequirement[]
   /** true when every dig in this step is safe (no lava/water/void, solid landing) */
@@ -1095,10 +1099,20 @@ export function descentStepFallerAt(
   head: Vec3Json,
   at: (x: number, y: number, z: number) => { name: string; boundingBox?: string } | null,
 ): string | null {
-  const cell = mode === 'down' ? head : { x: head.x, y: head.y + 1, z: head.z }
-  const block = at(cell.x, cell.y, cell.z)
-  if (block === null || block.boundingBox === 'empty') return null
-  return isFallingBlockName(block.name) ? block.name : null
+  // `down` opens wall + head + floor for the transit: a faller AT `head` is the
+  // transit cell itself, and a faller directly above it drops into the column
+  // the moment `head` is dug. `level` opens the 1x2 corridor (wall+head), so
+  // its drop-in source is only the cell above `head`.
+  const cells =
+    mode === 'down'
+      ? [head, { x: head.x, y: head.y + 1, z: head.z }]
+      : [{ x: head.x, y: head.y + 1, z: head.z }]
+  for (const cell of cells) {
+    const block = at(cell.x, cell.y, cell.z)
+    if (block === null || block.boundingBox === 'empty') continue
+    if (isFallingBlockName(block.name)) return block.name
+  }
+  return null
 }
 
 export type GoalState = {
@@ -4205,17 +4219,21 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       primaryBlock === null
         ? { yield: null, harvestTool: null, harvestTier: null }
         : resolveBlockHarvest(bot, primaryBlock.name)
-    // Everything the body's landing cell occupies, minus the cells that are
-    // already open. `down` lands at feet.y - 1 and needs the front cell at
-    // feet.y (the body's upper half); `level` lands at feet.y and needs the
-    // 2-high corridor (front + head). The own column never digs a cell the body
-    // itself occupies.
+    // Everything the body's 1x2 transit column must move through, minus the
+    // cells that are already open. `down` lands at feet.y - 1 - but the move
+    // still ENTERS the front column at feet level, so the body's upper half
+    // passes through `head` while its feet pass through `wall`: a solid head
+    // cell left un-dug makes the step physically un-enterable even though every
+    // listed dig is legal (measured live: `WALL_ENTRY:down` dug wall+floor,
+    // then `packet locomotion blocked` on the untouched head cell above the
+    // wall). `level` lands at feet.y and needs the 2-high corridor (front +
+    // head). The own column never digs a cell the body itself occupies.
     const digCells: Vec3Json[] = ownColumn
       ? floorSolid
         ? [floor]
         : []
       : mode === 'down'
-        ? [...(wallSolid ? [wall] : []), ...(floorSolid ? [floor] : [])]
+        ? [...(wallSolid ? [wall] : []), ...(headSolid ? [head] : []), ...(floorSolid ? [floor] : [])]
         : [...(wallSolid ? [wall] : []), ...(headSolid ? [head] : [])]
     const digs: DescentDigRequirement[] = digCells.map((cell) => {
       const block = at(cell.x, cell.y, cell.z)
