@@ -24,7 +24,7 @@ import type { DecisionScheduler, DecisionTrigger } from './scheduler.ts'
 import { distance, scannedBlockNames } from './state.ts'
 import type { AgentSignals, KnownResource, GoalState, HarvestTool, Vec3Json, WorldState } from './state.ts'
 import { System2RequestCancelledError } from './system2/service.ts'
-import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2PlanRequest, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2/service.ts'
+import type { LlmSummonReason, System2BlockerFacts, System2Brain, System2GroundedAlternative, System2Objective, System2Outcome, System2Plan, System2PlanRequest, System2SemanticOutcome, System2ToolGap, System2WithheldCandidate } from './system2/service.ts'
 import { applySystem2RecoveryFence, evaluateSystem2Apply, formatCompiledGoalRows, formatSystem2Discard, formatSystem2PlanApplied, system2BodyOwned } from './system2/authority.ts'
 import type { PlanWorldFactsBasis, System2ApplyState, System2RequestContext } from './system2/authority.ts'
 import { SYSTEM2_SEMANTIC_HISTORY_LIMIT, acceptedSystem2PlanGoals, createSystem2SemanticOutcome, finalizeSystem2SemanticOutcomes, system2SemanticBlocker, system2SemanticFingerprint } from './system2/causal-history.ts'
@@ -469,6 +469,18 @@ export function semanticStateFingerprint(host: System2PlaneHost): string {
  */
 const SYSTEM2_APPLY_DEFER_ATTEMPTS = 20
 const SYSTEM2_APPLY_DEFER_MS = 1500
+// A hung provider call must not pin `llmInFlight` forever: the summon wake would
+// keep firing while every actual call is suppressed by the stale flag. Bound the
+// plan call so a dead provider eventually clears the flag and summons resume.
+const SYSTEM2_PLAN_TIMEOUT_MS = 90_000
+class System2PlanTimeoutError extends Error {
+  readonly requestId: string
+  constructor(requestId: string, timeoutMs: number) {
+    super(`System2 plan call timed out after ${timeoutMs}ms`)
+    this.name = 'System2PlanTimeoutError'
+    this.requestId = requestId
+  }
+}
 
 /**
  * The durable world-fact names a plan's goals directly name — each goal's
@@ -865,8 +877,12 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
     host.tickCounter,
   )
 
-  void host.system2
-    .plan(request)
+  void Promise.race<System2Plan>([
+    host.system2.plan(request),
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new System2PlanTimeoutError(requestContext.requestId, SYSTEM2_PLAN_TIMEOUT_MS)), SYSTEM2_PLAN_TIMEOUT_MS)
+    }),
+  ])
     .then(async (plan) => {
       const staleDiscard = () => {
         host.logger.warn(
@@ -1182,6 +1198,15 @@ reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
           'system2',
           'SYSTEM2_REQUEST_CANCELLED',
           { reason, requestId: requestContext.requestId, cancellationReason: error.reason },
+          host.tickCounter,
+        )
+        return
+      }
+      if (error instanceof System2PlanTimeoutError) {
+        host.logger.warn(
+          'system2',
+          `MERCURY_TIMEOUT requestId=${error.requestId} reason=${reason} provider=${host.system2Provider} model=${host.system2Model}`,
+          { reason, requestId: error.requestId, provider: host.system2Provider, model: host.system2Model },
           host.tickCounter,
         )
         return
