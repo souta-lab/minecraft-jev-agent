@@ -81,6 +81,22 @@ export const ENV_FIRE_BLOCKS: ReadonlySet<string> = new Set(['fire', 'soul_fire'
 export const ENV_LAVA_BLOCKS: ReadonlySet<string> = new Set(['lava', 'magma_block'])
 
 /**
+ * Contact-damage flora: passable blocks (`boundingBox='empty'`) that damage a
+ * body whose own column intersects them. Unlike fire/lava they carry no
+ * proximity margin - standing NEXT to a berry bush is how you harvest it, so
+ * the refusal rule is strictly own-cell: feet/head cells of a stance, never
+ * neighbours. The semantic hazard projection (`state.ts HAZARDS`) and the
+ * bridge exclusions (`bridgeRoute.ts BRIDGE_UNSAFE_BLOCKS`) already name both;
+ * this set is the same truth at the locomotion-admission boundary.
+ */
+export const ENV_CONTACT_BLOCKS: ReadonlySet<string> = new Set(['sweet_berry_bush', 'cactus'])
+
+/** True for contact-damage flora the body's own feet/head column must not enter. */
+export function envContactDamageBlock(name: string | null | undefined): boolean {
+  return typeof name === 'string' && ENV_CONTACT_BLOCKS.has(name)
+}
+
+/**
  * The proximity margin at which a lava-class block makes a destination unsafe.
  *
  * ONE number for one question ("is this destination touching lava"): the

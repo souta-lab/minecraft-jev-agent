@@ -58,7 +58,7 @@ import type { DescentScaffoldProbe } from './descentScaffold.ts'
 import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
 import type { ArmorSlot } from './gearPlan.ts'
 import { headroomAcrossFootprint } from './bodyGeometry.ts'
-import { buildEnvHazardState, envHazardKindOfBlock } from './envHazard.ts'
+import { buildEnvHazardState, envContactDamageBlock, envHazardKindOfBlock } from './envHazard.ts'
 import type { EnvHazardCell, EnvHazardState } from './envHazard.ts'
 import { BRIDGE_DIRS, BRIDGE_PROBE_DEPTH, bridgeDirOffset, isBridgeUnsafeBlockName } from './bridgeRoute.ts'
 import type { BridgeDir, BridgeProbe, BridgeProbeCell } from './bridgeRoute.ts'
@@ -4174,6 +4174,14 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     } else if (mode === 'down' && clear(floor.x, floor.y, floor.z)) {
       reason = 'floor already open (uncontrolled fall)'
       refusal = 'open_floor'
+    } else if (mode === 'level' && envContactDamageBlock(at(wall.x, wall.y, wall.z)?.name)) {
+      // Own-cell only: for `level` the wall cell IS the landing stance feet
+      // cell, and `clear()` admits flora (empty bounding box) without digging
+      // it - the body would walk into contact damage. A bush anywhere else in
+      // this step's column self-clears: it can only sit on a cell this plan
+      // either digs (support pops the plant) or already refuses.
+      reason = `${at(wall.x, wall.y, wall.z)?.name} in the step column damages on contact`
+      refusal = 'hazard'
     } else if (hazardNearby) {
       reason = 'lava/water in the step column'
       refusal = 'hazard'
@@ -4467,13 +4475,16 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
       if (top === feetY + 2) {
         // Ceiling-top face: the cut itself IS the destination's first overhead
         // cell. Its feet+1 neighbour must be an eventual open or diggable
-        // destination, and feet+0 must support the step.
+        // destination, and feet+0 must support the step. Contact flora in the
+        // destination column is a refusal, not a binding dig cell - a bush has
+        // no solid to cut.
         if (
           (clear(x, feetY + 1, z) || diggableSolid(x, feetY + 1, z)) &&
           usableGround(x, feetY, z) &&
           diggableSolid(x, top, z) &&
           !isProtectedStationBlock(name) &&
           !destHazard &&
+          !envContactDamageBlock(at(x, feetY + 1, z)?.name) &&
           !floodAdjacent(x, top, z)
         ) {
           blockedBy = { pos: { x, y: top, z }, name }

@@ -11,7 +11,7 @@
 
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { ENV_LAVA_PROXIMITY, envHazardKindOfBlock, isLavaClassBlock } from './envHazard.ts'
+import { ENV_LAVA_PROXIMITY, envContactDamageBlock, envHazardKindOfBlock, isLavaClassBlock } from './envHazard.ts'
 import { contactGapY, MELEE_ATTACK_REACH, meleeHorizontalBudget, selectAttackStand } from './combatClosure.ts'
 import type { AttackStandFact } from './combatClosure.ts'
 import { formatStationUnreachable } from './reachability.ts'
@@ -199,10 +199,15 @@ export function botStandColumnHazardAt(host: PathProbesHost, x: number, y: numbe
     const block = host.bot.blockAt(scratch.set(cx, cy, cz))
     return block === null || block === undefined ? null : (block.name ?? null)
   }
-  // The stance's OWN body column: fire/lava the body would be inside.
+  // The stance's OWN body column: fire/lava the body would be inside, and
+  // contact-damage flora (berry bush/cactus) at the feet or head cell. Flora is
+  // own-cell only by contract - a bush in the support cell is not possible and
+  // a neighbouring bush is how the body forages, so it is never refused here.
   if (envHazardKindOfBlock(nameAt(x, y, z)) !== null) return true
   if (envHazardKindOfBlock(nameAt(x, y + 1, z)) !== null) return true
   if (envHazardKindOfBlock(nameAt(x, y - 1, z)) !== null) return true
+  if (envContactDamageBlock(nameAt(x, y, z))) return true
+  if (envContactDamageBlock(nameAt(x, y + 1, z))) return true
   // A lava-class neighbour inside the shared margin: standing there means
   // standing in it (`envHazardProximityDenied(false, name)` semantics). A cell
   // whose offset has any component >= 2 is at least 2 away, so it can never be

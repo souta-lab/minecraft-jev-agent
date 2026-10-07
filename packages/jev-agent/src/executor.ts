@@ -20,6 +20,7 @@ import { observedAir } from './air.ts'
 import type { Candidate, CandidateKind } from './candidates.ts'
 import { declaredDigCells, digsBotSupport, formatDigDownRefused, parseWaterRouteWitness } from './candidates.ts'
 import { filterSubmersionDestinations } from './wadePolicy.ts'
+import { ENV_CONTACT_BLOCKS } from './envHazard.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { MutationAuthorityContext } from './reach/kernel-authority-map.ts'
 import type { EventLogger } from './jev.ts'
@@ -2408,6 +2409,15 @@ export class Executor {
     movements.dontMineUnderFallingBlock = true
     movements.maxDropDown = MAX_PLANNED_DROP_DOWN
     movements.infiniteLiquidDropdownDistance = false
+    // Stock `blocksToAvoid` names fire/cobweb/lava only; a passable contact-
+    // damage plant reads `safe` to the planner, so a route could walk the body
+    // through a berry bush. The envHazard vocabulary owns the same truth the
+    // semantic hazard projection and bridge exclusions already carry.
+    const blockIds = (this.bot.registry as { blocksByName?: Record<string, { id?: number }> } | undefined)?.blocksByName
+    for (const name of ENV_CONTACT_BLOCKS) {
+      const id = blockIds?.[name]?.id
+      if (typeof id === 'number') movements.blocksToAvoid.add(id)
+    }
     this.bot.pathfinder.setMovements(movements)
     this.movementsReady = true
     this.logger.info('executor', 'movements pinned: canDig=false, allow1by1towers=false, scaffolding=[], wade-bound=true', {
