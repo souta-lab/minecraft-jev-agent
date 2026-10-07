@@ -7497,10 +7497,36 @@ function ascentRouteTo(
     const overhead =
       refusal.reason === 'step_overhead' && refusal.blocker !== undefined
         ? stepOverheadCandidates(state, options, { kind: 'headroom', cell: refusal.blocker })
-            .map((candidate) => ({
-              ...candidate,
-              meta: { ...candidate.meta, ...spec.extraMeta, ascentTargetY: spec.targetY },
-            }))
+            .map((candidate) => {
+              const contactEntityId = spec.extraMeta.contactEntityId
+              const routeTarget =
+                typeof contactEntityId === 'number'
+                  ? `entity:${contactEntityId}:ascent-y>=${spec.targetY}`
+                  : spec.extraMeta.foodHabitat === true
+                    ? `animal-habitat:y>=${spec.targetY}`
+                    : `${spec.idPrefix}y>=${spec.targetY}`
+              const routeLeg =
+                typeof contactEntityId === 'number'
+                  ? 'contact_ascent_clearance'
+                  : spec.extraMeta.foodHabitat === true
+                    ? 'food_habitat_clearance'
+                    : 'ascent_clearance'
+              const routeLabel =
+                spec.extraMeta.foodHabitat === true
+                  ? `food-habitat ascent to y>=${spec.targetY}`
+                  : `${spec.label} toward y>=${spec.targetY}`
+              return {
+                ...candidate,
+                label: `${candidate.label} to continue ${routeLabel}`,
+                meta: {
+                  ...candidate.meta,
+                  ...spec.extraMeta,
+                  ascentTargetY: spec.targetY,
+                  approachLeg: routeLeg,
+                  approachTarget: routeTarget,
+                },
+              }
+            })
         : []
     return {
       candidates: overhead,

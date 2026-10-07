@@ -91,8 +91,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 7
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v7'
+export const JEV_PROJECTION_VERSION = 8
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v8'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -490,7 +490,24 @@ export function semanticTargetRef(candidate: Candidate): SemanticTargetRef {
         label,
       }
     }
-    case 'MINE':
+    case 'MINE': {
+      // A route clearance is the same semantic ascent commitment across the
+      // different physical cells the route planner may expose. Preserve the
+      // exact cell in the grounded Candidate/effect contract; only the Jev
+      // semantic identity uses the explicit route anchor.
+      const approachTarget = metaString(candidate, 'approachTarget')
+      if (approachTarget !== null) {
+        const approachLeg = metaString(candidate, 'approachLeg') ?? 'leg'
+        return {
+          kind: 'position',
+          key: `approach:${approachLeg}->${approachTarget}`,
+          label: `${approachLeg} to ${approachTarget}`,
+        }
+      }
+      const cell = candidate.target === null ? 'none' : cellKey(candidate.target)
+      const name = candidate.targetName ?? candidate.itemName ?? 'block'
+      return { kind: 'block', key: `${name}@${cell}`, label: `${name} at ${cell}` }
+    }
     case 'DESCEND':
     case 'STEP':
     case 'IGNITE': {

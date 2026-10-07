@@ -566,9 +566,9 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
   )
 }
 
-// p27.36: the exact step-overhead MINE is the first leg of the grounded food
-// habitat route. Losing caller metadata here makes starvation-only filtering
-// erase the only route and leave an unrelated explore MOVE selectable.
+// p27.37: the exact step-overhead MINE is the first leg of the grounded food
+// habitat route. Its typed identity must keep that purpose and destination
+// through starvation-only filtering and cell-level clearance realizations.
 {
   const state = hungryUndergroundWorld({ cobblestone: 64, iron_pickaxe: 1 })
   const queued: QueuedGoal = {
@@ -623,12 +623,15 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
     ? []
     : restrictCandidatesDuringCriticalDamage(state, [clearance, genericExplore])
   check(
-    '(e3) p27.36 step-overhead clearance keeps food-habitat identity through starvation filtering under a stale cave-explore head',
+    '(e3) p27.37 step-overhead clearance keeps food-habitat identity through starvation filtering under a stale cave-explore head',
     ascent.refusal?.reason === 'step_overhead' &&
       clearance?.target?.x === 24 && clearance.target.y === 55 && clearance.target.z === 9 &&
       clearance.meta.clearance === true && clearance.meta.stepOverhead === true &&
       clearance.meta.foodHabitat === true && clearance.meta.foodHabitatGoalId === 'g9:explore' &&
       clearance.meta.ascentTargetY === ANIMAL_HABITAT_SEA_LEVEL &&
+      clearance.meta.approachLeg === 'food_habitat_clearance' &&
+      clearance.meta.approachTarget === 'animal-habitat:y>=63' &&
+      clearance.label.includes('food-habitat ascent') &&
       starvingOffer.length === 1 && starvingOffer[0]?.id === clearance.id,
     `refusal=${ascent.refusal?.reason ?? 'none'} clearance=${clearance?.id ?? 'none'} foodHabitat=${String(clearance?.meta.foodHabitat)} goal=${String(clearance?.meta.foodHabitatGoalId)} offer=[${starvingOffer.map((candidate) => candidate.id).join(' ')}]`,
   )

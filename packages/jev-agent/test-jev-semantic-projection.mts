@@ -486,7 +486,7 @@ addCase('(5b) a verified kill without its declared drop is a typed search bounda
   })
   const line = formatSkillOutcomePacket(partial)
   const pass =
-    JEV_PROJECTION_VERSION === 7 &&
+    JEV_PROJECTION_VERSION === 8 &&
     terminalReasonFor({ status: 'done', failure: 'drop_not_acquired', verified: true }) === 'drop_not_acquired' &&
     partial.terminalReason === 'drop_not_acquired' &&
     partial.verification.verified === false &&
@@ -921,6 +921,51 @@ addCase('(13) dedup never merges semantically distinct MINE / DETOUR / PILLAR', 
     identities.some((identity) => identity.includes('approach:pillar->11,64,11')) &&
     dedupe.groups.get(identities.find((identity) => identity.includes('approach:detour')) ?? '')?.length === 4
   return { pass, detail: `offered=${dedupe.offered.length} merged=${dedupe.merged} identities=${JSON.stringify(identities)}` }
+})
+
+addCase('(13b) food-habitat clearance MINE keeps one semantic choice across cell realizations', () => {
+  const clearance = (id: string, x: number, z: number, target = 'animal-habitat:y>=63') =>
+    candidate({
+      id,
+      kind: 'MINE',
+      label: `mine stone at ${x},54,${z} for the food-habitat ascent`,
+      targetName: 'stone',
+      target: { x, y: 54, z },
+      inReach: true,
+      meta: { approachLeg: 'food_habitat_clearance', approachTarget: target, foodHabitat: true, ascentTargetY: 63 },
+    })
+  const firstCandidate = clearance('MINE:b24_55_9', 24, 9)
+  const nextCandidate = clearance('MINE:b25_55_9', 25, 9)
+  const first = buildJevSemanticProjection(projectionInput({ candidates: [firstCandidate] }))
+  const next = buildJevSemanticProjection(projectionInput({ candidates: [nextCandidate] }))
+  const boundary = classifySemanticBoundary({ answered: first, current: next, leaseHeld: true })
+  const replay = repointReplayedChoice(first.candidates[0]?.id ?? null, first.candidates, next.candidates)
+
+  const ordinaryMine = candidate({
+    id: 'MINE:ordinary',
+    kind: 'MINE',
+    targetName: 'stone',
+    target: { x: 25, y: 55, z: 9 },
+    inReach: true,
+  })
+  const changedDestination = clearance('MINE:b25_55_9_changed', 25, 9, 'animal-habitat:y>=64')
+  const genericProjection = buildJevSemanticProjection(projectionInput({ candidates: [ordinaryMine] }))
+  const changedProjection = buildJevSemanticProjection(projectionInput({ candidates: [changedDestination] }))
+  const genericBoundary = classifySemanticBoundary({ answered: first, current: genericProjection, leaseHeld: true })
+  const destinationBoundary = classifySemanticBoundary({ answered: first, current: changedProjection, leaseHeld: true })
+  const deduped = dedupeSemanticCandidates([firstCandidate, nextCandidate], context)
+  const pass =
+    first.candidates[0]?.identity === next.candidates[0]?.identity &&
+    projectionHash(first) === projectionHash(next) &&
+    !boundary.requery && boundary.reason === 'same_semantic_state' &&
+    replay.repointed && replay.chosenId === nextCandidate.id && !replay.lost &&
+    deduped.offered.length === 1 && deduped.merged === 1 &&
+    genericBoundary.requery && genericBoundary.reason === 'candidate_set_changed' &&
+    destinationBoundary.requery && destinationBoundary.reason === 'candidate_set_changed'
+  return {
+    pass,
+    detail: `identity=${first.candidates[0]?.identity} sameHash=${projectionHash(first) === projectionHash(next)} replay=${JSON.stringify(replay)} generic=${genericBoundary.reason} changedTarget=${destinationBoundary.reason}`,
+  }
 })
 
 addCase('(14) live trace: fewer pi calls per verified progress, no hidden deterministic fallback', () => {
