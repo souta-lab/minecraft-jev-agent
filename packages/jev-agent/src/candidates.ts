@@ -14751,6 +14751,16 @@ export function exploredCellKey(position: Vec3Json): string {
   return `p${Math.floor(position.x)}_${Math.floor(position.y)}_${Math.floor(position.z)}`
 }
 
+/** One admission boundary for generic search, including recovery emitters. */
+function groundedExploreSpots(state: WorldState, spots: readonly Vec3Json[]): Vec3Json[] {
+  const surfaceAccessY = surfaceExploreAccessTargetY(state)
+  // A novel underground cell is not evidence of access to the selected surface
+  // search space. Natural steps must reduce the altitude gap; explicit vertical
+  // or bridge plans retain their own grounded route contracts.
+  return exploreNoveltySpots(spots, state.signals.exploredCells)
+    .filter(spot => surfaceAccessY === null || spot.y > Math.floor(state.self.position.y))
+}
+
 function exploreFallbackCandidates(
   state: WorldState,
   options: CandidateOptions,
@@ -14759,13 +14769,7 @@ function exploreFallbackCandidates(
 ): Candidate[] {
   const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const limit = Math.max(1, options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES)
-  const surfaceAccessY = surfaceExploreAccessTargetY(state)
-  // A novel underground cell is not evidence of access to the selected surface
-  // search space. Natural steps must reduce the altitude gap; grounded vertical
-  // routes (including their detours/headroom) are offered by the shared ascent
-  // helper. Do not turn generic level/down movement into a surface trajectory.
-  const novel = exploreNoveltySpots(state.terrain.standable, state.signals.exploredCells)
-    .filter(spot => surfaceAccessY === null || spot.y > Math.floor(state.self.position.y))
+  const novel = groundedExploreSpots(state, state.terrain.standable)
   const best = pickExplore(
     state,
     novel,
@@ -16843,6 +16847,13 @@ function routeOpeningCandidates(
   digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const exploring = state.goalQueue?.current?.kind === 'explore'
+  const searchSpots = exploring ? groundedExploreSpots(state, state.terrain.standable) : state.terrain.standable
+  // Acquisition does not make a generic search leg exempt from its WHAT.
+  // Resource/station recovery and explicit bridge/vertical/dig plans remain
+  // governed by their own target-reduction contracts.
+  const admitsSearch = (candidate: Candidate): boolean => !exploring || candidate.meta.explore !== true ||
+    (candidate.target !== null && groundedExploreSpots(state, [candidate.target]).length > 0)
   const out: Candidate[] = [
     ...stepCutCandidates(state, options),
     ...existingDescentRouteCandidates(state, options),
@@ -16851,7 +16862,7 @@ function routeOpeningCandidates(
   ]
   const spot = pickExplore(
     state,
-    state.terrain.standable,
+    searchSpots,
     focus,
     options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
     options.blacklistedMoveTargets,
@@ -16867,7 +16878,7 @@ function routeOpeningCandidates(
       ),
     )
   }
-  if (blockedTarget === null) return out
+  if (blockedTarget === null) return out.filter(admitsSearch)
   // `pickExplore` picks the NEAREST standable frontier, which is frequently
   // behind the body when the withheld locomotion target is far away. The
   // `moveAdvancesTowardTarget` filter below then removes every MOVE and Jev is
@@ -16888,7 +16899,7 @@ function routeOpeningCandidates(
     Math.abs(spot.x - blockedTarget.x) <= 3 &&
     Math.abs(spot.y - blockedTarget.y) <= 1 &&
     Math.abs(spot.z - blockedTarget.z) <= 3
-  const candidatesForWaypoint = state.terrain.standable
+  const candidatesForWaypoint = searchSpots
     .filter((spot) => !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot))
     .filter((spot) => distance(spot, state.self.position) > 1)
   // The waypoint must make real progress toward the withheld target. Offering the
@@ -17062,7 +17073,8 @@ function routeOpeningCandidates(
   // remaining work is to produce a real multi-leg route (walk a committed leg
   // toward the target, then re-plan) rather than to offer lateral wandering.
   return out.filter(
-    (candidate) => candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, goalTarget),
+    (candidate) => admitsSearch(candidate) &&
+      (candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, goalTarget)),
   )
 }
 
@@ -17131,7 +17143,7 @@ function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candi
         state,
         options,
         target,
-        moveLabel(target, 'step into the route the previous dig opened', state.self.position),
+        moveLabel(target, 'step into the sensed open level route', state.self.position),
         null,
       ),
     )

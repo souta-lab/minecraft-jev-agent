@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { defaultCandidateOptions, generateGroundedCandidates, restrictCandidatesAtCriticalHealth } from './src/candidates.ts'
+import { applyReachabilityGate, defaultCandidateOptions, generateGroundedCandidates, restrictCandidatesAtCriticalHealth } from './src/candidates.ts'
+import type { Candidate } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { QueuedGoal } from './src/goalQueue.ts'
 import { currentOptionContextForQueuedGoal } from './src/optionSpec.ts'
-import type { WorldState } from './src/state.ts'
+import type { DescentOption, WorldState } from './src/state.ts'
 
 function scene(mode: 'surface' | 'cave' | null = 'surface', y = 24): WorldState {
   const body = { x: 3, y, z: 8 }
@@ -33,6 +34,28 @@ function scene(mode: 'surface' | 'cave' | null = 'surface', y = 24): WorldState 
       lastPolicyConfidence: null, maxConcurrentActions: 0, escalationRecommended: false,
       failedCandidates: {}, knownResources: [] },
   }
+}
+
+function openLevelStep(state: WorldState): DescentOption {
+  const body = state.self.position
+  const step = { x: body.x, y: body.y, z: body.z + 1 }
+  return { dir: 'S', mode: 'level', dx: 0, dz: 1, step, wall: step,
+    head: { ...step, y: step.y + 1 }, floor: { ...step, y: step.y - 1 },
+    wallSolid: false, headSolid: false, floorSolid: true, landingUsable: true,
+    safe: true, reason: 'safe', digName: 'air', digHarvestTool: null, digHarvestTier: null, diggable: false }
+}
+
+function acquireBlockedRoute(state: WorldState, higher = false) {
+  const body = state.self.position
+  const target = { x: body.x, y: body.y + (higher ? 15 : 0), z: body.z + 4 }
+  const blocked: Candidate = { id: 'WITHHELD_ROUTE', kind: 'MOVE', label: 'approach sensed target',
+    target, targetName: null, targetEntityId: null, itemName: null, requiresTool: false,
+    toolName: null, inReach: false, hasStandableAdjacent: true, meta: { tick: state.tick } }
+  state.descent = [openLevelStep(state)]
+  state.terrain.standable = [body, state.descent[0]!.step, target]
+  return applyReachabilityGate([blocked], state, { ...defaultCandidateOptions,
+    reachability: { memory: null, pathProbe: position =>
+      position.x === target.x && position.y === target.y && position.z === target.z ? 'no_path' : 'reachable' } })
 }
 
 describe('explicit surface search realization', () => {
@@ -112,5 +135,35 @@ describe('explicit surface search realization', () => {
       expect(grounded.candidates.some(c => c.meta.explore === true && c.target!.y === state.self.position.y)).toBe(true)
       expect(grounded.candidates.some(c => c.meta.surfaceAscent === true)).toBe(false)
     }
+  })
+
+  test('route acquisition cannot reintroduce generic underground level search under surface mode', () => {
+    const state = scene()
+    const grounded = acquireBlockedRoute(state, true)
+    expect(grounded.withheld.some(w => w.candidate.id === 'WITHHELD_ROUTE')).toBe(true)
+    expect(grounded.candidates.some(c => c.meta.explore === true && c.target!.y <= state.self.position.y)).toBe(false)
+    // The shared vertical remedy is still an admitted capability, chosen by pi.
+    expect(grounded.candidates.some(c => c.kind === 'MOVE' && c.meta.vertical === 'pillar')).toBe(true)
+  })
+
+  test('generic recovery exploration cannot replay an already occupied open-level cell', () => {
+    const state = scene('cave')
+    const opened = openLevelStep(state).step
+    state.signals.exploredCells = new Set([`p${opened.x}_${opened.y}_${opened.z}`])
+    const grounded = acquireBlockedRoute(state)
+    expect(grounded.candidates.some(c => c.meta.explore === true && c.target?.x === opened.x &&
+      c.target.y === opened.y && c.target.z === opened.z)).toBe(false)
+  })
+
+  test('an unvisited forward level continuation remains available for cave exploration', () => {
+    const state = scene('cave')
+    const opened = openLevelStep(state).step
+    const grounded = acquireBlockedRoute(state)
+    const forward = grounded.candidates.find(c => c.target?.x === opened.x && c.target.y === opened.y && c.target.z === opened.z)
+    expect(forward).toBeDefined()
+    expect(forward!.meta.capabilityAcquisition).toBe(true)
+    expect(forward!.label).not.toContain('previous dig')
+    expect(forward!.meta.forced).toBeUndefined()
+    expect(forward!.meta.selected).toBeUndefined()
   })
 })
