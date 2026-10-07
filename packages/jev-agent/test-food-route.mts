@@ -44,6 +44,7 @@ import {
   generateGroundedCandidates,
   applyReachabilityGate,
   pickFood,
+  restrictCandidatesDuringCriticalDamage,
 } from './src/candidates.ts'
 import { formatFoodSourceGap, isEdibleFoodItem } from './src/foodSources.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
@@ -542,6 +543,34 @@ addCase('(d6) a hungry body with no food route and no search route gets an elect
       String(foodEscalate.meta.reason) === `food_source:${result.foodGap.reason}` &&
       foodEscalate.label.includes(`food_source:${result.foodGap.reason}`),
     detail: `next=${result.foodGap?.next ?? 'none'} escalates=[${escalates.map((candidate) => String(candidate.meta.reason)).join(',') || 'none'}]`,
+  }
+})
+
+addCase('(d6b) a starving body with no food or search route keeps an electable System2 handoff', () => {
+  const state = perceive({ counts: { iron_ingot: 4, stick: 4, spruce_planks: 3, spruce_log: 1 }, food: 0, health: 1, blocks: FLOOR })
+  state.goalQueue = queueWith({
+    ...craftGoal(),
+    id: 'g2:collect:food',
+    kind: 'collect',
+    description: 'collect 8 x food',
+    targetItem: 'food',
+    requiredCount: 8,
+    optionInstanceId: 'collect:food#c8',
+    optionTemplateId: 'collect:food',
+  })
+  const result = grounded(state)
+  const escalates = result.candidates.filter((candidate) => candidate.kind === 'ESCALATE')
+  const restricted = restrictCandidatesDuringCriticalDamage(state, result.candidates)
+  const foodEscalate = escalates.find((candidate) => String(candidate.meta.reason).startsWith('food_source:'))
+  return {
+    pass:
+      result.foodGap !== null &&
+      result.foodGap.starving &&
+      result.foodGap.next === 'escalate' &&
+      foodEscalate !== undefined &&
+      String(foodEscalate.meta.reason) === `food_source:${result.foodGap.reason}` &&
+      restricted.some((candidate) => candidate.id === foodEscalate.id),
+    detail: `gap=${result.foodGap === null ? 'none' : formatFoodSourceGap(result.foodGap)} generated=[${result.candidates.map((candidate) => candidate.id).join(',')}] critical=[${restricted.map((candidate) => candidate.id).join(',')}]`,
   }
 })
 

@@ -31,6 +31,7 @@ import { findInventoryFuel, goalResourceMatches, inventoryFuels, isResourceClass
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
 import type { FoodSourceGap, FoodSourceMissingLink } from './foodSources.ts'
+import { isReplaceableRecoveryGoal } from './protectedGoals.ts'
 import { isProtectedStationBlock, isInfestedBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectClearanceTool, selectDigTool, strongestDigRequirement } from './toolChoice.ts'
@@ -4054,25 +4055,24 @@ export function generateGroundedCandidates(
   // offered set, so it can never claim a missing producer while one is on offer.
   const foodGap = foodSourceGap(state, options, grounded.candidates)
   // `next=escalate` is the code-owned statement that this offer grounds no route
-  // toward food AND no grounded search route at all, so the starvation/
-  // escalation arm the gap names must be reachable, not merely logged. Measured
-  // live (portal-p24 run-muue9c3f-7cyn gen-muug8kq2-5gdu28): the gap stayed open
-  // ~20 min while the starvation bound it was designed to ride was laundered by
-  // interleaved `search` progress (any verified DESCEND/PICKUP resets the row's
-  // starvedDecisions under an open-ended explore head), so a handoff could only
-  // arrive via the bodyStarving restriction at food=0 - the lethal-fragility
-  // timing of the 23:25 starvation death. The injection is deliberately limited
-  // to the pre-floor window: at `starving` the critical-damage restriction and
-  // its own exhaustion ledger own the offer shape (a lone injected ESCALATE
-  // would silently collapse their "original set stays observable" fallback).
-  // The candidate is appended only when the offered set carries no explore
-  // route (`next=escalate`), so it can never outrank a grounded search answer;
-  // ESCALATE is excluded from `actionable`, so the starvation ledger still
-  // counts the tick, and the election stays with Jev.
-  const candidates =
+  // toward food AND no grounded search route at all. At the starvation floor,
+  // make that handoff electable when the active row is replaceable optional
+  // recovery (food or explicit surface explore): otherwise BODY_STARVING filters
+  // every non-food candidate while that row has no realizable route, so neither
+  // Jev nor System2 can reconsider the optional recovery from current facts.
+  // Other active mission rows retain the bounded critical-damage escalation.
+  // The critical-damage restriction recognizes ESCALATE as a survival answer,
+  // so this precise gap reaches System2; its original-set fallback remains when
+  // no typed handoff was grounded. The handoff does not select or synthesize a
+  // replacement goal. Append it only when the offered set has no food or search
+  // route, so it cannot displace a grounded recovery action.
+  const activeGoal = state.goalQueue?.current ?? null
+  const foodEscalationAllowed =
     foodGap !== null &&
     foodGap.next === 'escalate' &&
-    !foodGap.starving &&
+    (!foodGap.starving || (activeGoal !== null && isReplaceableRecoveryGoal(activeGoal)))
+  const candidates =
+    foodEscalationAllowed &&
     !grounded.candidates.some((candidate) => candidate.kind === 'ESCALATE')
       ? [
           ...grounded.candidates,
