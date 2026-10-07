@@ -233,6 +233,8 @@ export interface ReachabilityTarget {
    * apply to it. Absent/false = a plain walk claim.
    */
   carriesRoute?: boolean
+  /** This route starts with a jump from the CURRENT footprint (pillar/step-up). */
+  requiresCurrentJump?: boolean
 }
 
 /** World facts about the destination and the body's current column. */
@@ -248,6 +250,8 @@ export interface ReachabilityWorld {
   footingSolid: boolean
   /** the bot's own column has jump headroom */
   headroomClear: boolean
+  /** Sensor-named current jump blocker; absent when an older replay did not name it. */
+  headroomCell?: Vec3Json | null
   /**
    * fact: the body has at least one standable cell beyond its own column, so a
    * travel leg exists at all (`!strandedOnColumn`). Absent means "assume the
@@ -417,6 +421,14 @@ export function evaluateReachability(
 
   const toolCapability = missingToolCapability(target.barrier, inventory)
   if (toolCapability !== null) return unreachable('missing_tool', [toolCapability])
+
+  // A short realization of an explicit ascent still owns a jump. Its +1
+  // destination must not skip the current-footprint precondition merely because
+  // it lies inside the ordinary walk-gap bound. Clearance is an existing typed
+  // capability, not an alternative action selected by this evaluator.
+  if (target.requiresCurrentJump === true && target.position.y > world.self.y && !world.headroomClear) {
+    return unreachable('needs_ascend', [{ kind: 'headroom', cell: world.headroomCell ?? null }])
+  }
 
   const dy = Math.round(target.position.y - world.self.y)
   if (dy > ASCEND_GAP_LIMIT) {

@@ -15935,6 +15935,7 @@ function reachabilityTargetFor(state: WorldState, candidate: Candidate): Reachab
     // bound: the gate and the executor decide a >4-high claim identically.
     carriesRoute:
       hasVerticalPlan(candidate) || isBridgeMove(candidate) || candidate.meta.submersionEscape === true,
+    requiresCurrentJump: candidate.meta.vertical === 'staircase-up' || candidate.meta.vertical === 'pillar',
   }
 }
 
@@ -16088,6 +16089,7 @@ function reachabilityWorldFor(
       ),
     footingSolid: column.footingSolid,
     headroomClear: column.headroomClear,
+    headroomCell: column.headroomCell,
     // A body with a walkable frontier can TRAVEL to a far target below and
     // re-derive the descent where the terrain provides one; only a body confined
     // to its own column must already hold the local descent step. This is the

@@ -166,4 +166,54 @@ describe('explicit surface search realization', () => {
     expect(forward!.meta.forced).toBeUndefined()
     expect(forward!.meta.selected).toBeUndefined()
   })
+
+  test('a short staircase-up under a current-footprint roof is withheld for its exact headroom clearance', () => {
+    const state = scene()
+    const body = state.self.position
+    const roof = { x: body.x, y: body.y + 2, z: body.z }
+    const step = { x: body.x + 1, y: body.y + 1, z: body.z }
+    state.headroomCuts = [{ pos: roof, name: 'stone', safe: true, reason: 'jump blocked', currentFootprint: true }]
+    state.stepCuts = [{ dir: 'E', dx: 1, dz: 0, cut: step, step, name: 'stone', safe: true, reason: 'safe' }]
+    const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+    const ascent = grounded.withheld.find(w => w.candidate.meta.surfaceAscent === true)
+    expect(ascent).toBeDefined()
+    expect(ascent!.candidate.meta.vertical).toBe('staircase-up')
+    expect(ascent!.candidate.target!.y - body.y).toBe(1)
+    expect(ascent!.result.reason).toBe('needs_ascend')
+    expect(ascent!.result.missingCapabilities).toEqual([{ kind: 'headroom', cell: roof }])
+    expect(grounded.candidates.some(c => c.meta.surfaceAscent === true)).toBe(false)
+    expect(grounded.candidates.some(c => c.kind === 'MINE' && c.target?.x === roof.x &&
+      c.target.y === roof.y && c.target.z === roof.z && c.requiresTool === false)).toBe(true)
+    // STEP only removes the face. It does not promise a jump or body arrival.
+    const cut: Candidate = { id: 'STEP:E:face', kind: 'STEP', label: 'clear a staircase face',
+      target: step, targetName: 'stone', targetEntityId: null, itemName: null,
+      requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true,
+      meta: { clearance: true, digStep: true, dir: 'E', stepX: step.x, stepY: step.y, stepZ: step.z } }
+    expect(applyReachabilityGate([cut], state, defaultCandidateOptions).candidates.some(c => c.id === cut.id)).toBe(true)
+    state.headroomCuts = []
+    const cleared = generateGroundedCandidates(state, defaultCandidateOptions)
+    expect(cleared.candidates.some(c => c.meta.surfaceAscent === true && c.meta.vertical === 'staircase-up')).toBe(true)
+  })
+
+  test('a one-block pillar chunk also requires current jump headroom, while a plain level walk remains available', () => {
+    const state = scene()
+    const body = state.self.position
+    state.inventory = { counts: { dirt: 1 }, slots: [{ name: 'dirt', count: 1, slot: 0 }], totalItems: 1 }
+    const roof = { x: body.x, y: body.y + 2, z: body.z }
+    state.headroomCuts = [{ pos: roof, name: 'stone', safe: true, reason: 'jump blocked', currentFootprint: true }]
+    const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+    const pillar = grounded.withheld.find(w => w.candidate.meta.surfaceAscent === true)
+    expect(pillar).toBeDefined()
+    expect(pillar!.candidate.meta.vertical).toBe('pillar')
+    expect(pillar!.candidate.target!.y - body.y).toBe(1)
+    expect(pillar!.result.missingCapabilities).toEqual([{ kind: 'headroom', cell: roof }])
+    const walk: Candidate = { id: 'LEVEL_WALK', kind: 'MOVE', label: 'walk a proven level route',
+      target: { x: body.x + 1, y: body.y, z: body.z }, targetName: null, targetEntityId: null, itemName: null,
+      requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: {} }
+    const level = applyReachabilityGate([walk], state, { ...defaultCandidateOptions,
+      reachability: { memory: null, pathProbe: () => 'reachable' } })
+    expect(level.candidates.some(c => c.id === walk.id)).toBe(true)
+    state.headroomCuts = []
+    expect(generateGroundedCandidates(state, defaultCandidateOptions).candidates.some(c => c.meta.surfaceAscent === true)).toBe(true)
+  })
 })
