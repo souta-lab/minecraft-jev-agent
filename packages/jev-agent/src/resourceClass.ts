@@ -32,7 +32,7 @@ const STONE_ITEMS = new Set([
 // reported `EAT_REFUSED reason=no_food` and `missing=["no_edible_held"]`.
 //
 // The only surviving list is the POLICY exception table in `gameData.ts`
-// (`NON_SURVIVAL_EDIBLES` / `VANILLA_EDIBLE_DATA_GAPS`): the data cannot say
+// (`NON_SURVIVAL_EDIBLES`): the data cannot say
 // "this one poisons the eater", and it wrongly calls the fish buckets edible.
 
 const PICKAXE_SUFFIX = '_pickaxe'

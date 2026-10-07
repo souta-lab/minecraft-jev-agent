@@ -1063,19 +1063,32 @@ addCase('(v) a fed body: no food tag, no gap, and the offer is the hungry offer 
 // --- (w) the food truth is the running data version's own edible table --------
 
 addCase('(w) edible truth is game data (foods.json), not a hand-written list', () => {
-  const edibleByData = ['golden_carrot', 'rabbit_stew', 'chorus_fruit', 'tropical_fish', 'apple', 'cooked_beef']
+  const edibleByData = ['golden_carrot', 'rabbit_stew', 'chorus_fruit', 'tropical_fish', 'apple', 'cooked_beef', 'dried_kelp']
   const notSurvivalFood = ['potato', 'rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'cod_bucket']
-  const notFoodAtAll = ['red_mushroom', 'brown_mushroom', 'oak_leaves', 'oak_log', 'wheat', 'bone']
+  const notFoodAtAll = ['red_mushroom', 'brown_mushroom', 'oak_leaves', 'oak_log', 'wheat', 'bone', 'kelp']
   return {
     pass:
       edibleByData.every((name) => isEdibleFoodItem(name)) &&
       notSurvivalFood.every((name) => !isEdibleFoodItem(name)) &&
-      notFoodAtAll.every((name) => !isEdibleFoodItem(name)) &&
-      // the one vanilla-edible item this data version's foods.json omits
-      isEdibleFoodItem('kelp'),
+      notFoodAtAll.every((name) => !isEdibleFoodItem(name)),
     detail: `dataEdible=${edibleByData.map((n) => `${n}:${isEdibleFoodItem(n)}`).join(' ')} policyExcluded=${notSurvivalFood
       .map((n) => `${n}:${isEdibleFoodItem(n)}`)
       .join(' ')}`,
+  }
+})
+
+addCase('(w-kelp) raw kelp is an input, never food success or EAT; the existing furnace cook produces edible dried kelp', () => {
+  const blocks = [...FLOOR, { at: { x: 2, y: 64, z: 0 }, name: 'furnace', diggable: true }]
+  const raw = grounded(perceive({ counts: { kelp: 8, coal: 1 }, food: 0, health: 1, blocks }, 'food'))
+  const cooked = grounded(perceive({ counts: { dried_kelp: 1 }, food: 0, health: 1, blocks }, 'food'))
+  const smelt = raw.candidates.find(c => c.id === 'SMELT:dried_kelp')
+  return {
+    pass:
+      !raw.candidates.some(c => c.id === 'EAT:kelp') &&
+      smelt?.meta.inputItem === 'kelp' &&
+      smelt.meta.foodRoute === 'cook' && smelt.meta.foodTarget === 'dried_kelp' &&
+      cooked.candidates.some(c => c.id === 'EAT:dried_kelp'),
+    detail: `rawEat=${raw.candidates.some(c => c.id === 'EAT:kelp')} smelt=${smelt?.id ?? 'none'} cookedEat=${cooked.candidates.some(c => c.id === 'EAT:dried_kelp')}`,
   }
 })
 

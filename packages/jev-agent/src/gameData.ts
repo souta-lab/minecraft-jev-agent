@@ -506,14 +506,6 @@ export const NON_SURVIVAL_EDIBLES: ReadonlySet<string> = new Set([
 export const DESPERATION_EDIBLES: ReadonlySet<string> = new Set(['rotten_flesh'])
 
 /**
- * DATA GAPS: vanilla-edible items this data version's `foods.json` does not
- * list. Corrected here by exception instead of re-listing the whole food set;
- * `kelp` is edible in vanilla (1 point) while only its smelted form
- * `dried_kelp` is in the table.
- */
-export const VANILLA_EDIBLE_DATA_GAPS: ReadonlySet<string> = new Set(['kelp'])
-
-/**
  * True when the running data version says `itemNameWanted` is edible AND the
  * policy layer does not exclude it as survival food. `foodsByName` defaults to
  * the pinned data version so a caller with no registry at hand (the planner
@@ -525,7 +517,6 @@ export function isFoodItem(
 ): boolean {
   if (typeof itemNameWanted !== 'string' || itemNameWanted.length === 0) return false
   if (NON_SURVIVAL_EDIBLES.has(itemNameWanted)) return false
-  if (VANILLA_EDIBLE_DATA_GAPS.has(itemNameWanted)) return true
   const foods = reg?.foodsByName ?? pinnedFoodsByName()
   return foods !== null && foods[itemNameWanted] !== undefined
 }
