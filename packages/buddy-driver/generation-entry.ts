@@ -22,6 +22,7 @@ import { modelFailureAuthorityKind, modelFailureDisposition, stopGenerationForMo
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
 import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2/service.ts'
+import { isReplaceableRecoveryGoal } from '../jev-agent/src/protectedGoals.ts'
 import { canonicalDimensionId, createDimensionObserver, normalizeDimensionId } from './dimension-observer.ts'
 import { createDimensionProvenanceView, writeRefusal } from './dimension-provenance.ts'
 import type { DimensionProvenance } from '../jev-agent/src/state.ts'
@@ -82,6 +83,7 @@ import {
   starvationFact,
   worldOutcomeRungFloor,
 } from './planner.ts'
+import { createRecipeIndex, planNextCraftStep } from '../jev-agent/src/crafting.ts'
 import type { Counts, DurableLadderProgress, DurableLadderSource, Rung } from './planner.ts'
 import { formatPlanIdentity } from '../jev-agent/src/goalQueue.ts'
 import type { PlanIdentity, PlanObsoleteProof } from '../jev-agent/src/goalQueue.ts'
@@ -1566,24 +1568,68 @@ export function selectLedgerSnapshot(  hostSnapshot: GoalQueueSnapshot | null,
   return null
 }
 
+interface System2RecoveryReconsideration {
+  snapshot: GoalQueueSnapshot
+  retired: Array<{ id: string; description: string }>
+}
+
+/**
+ * A model-authored recovery Option is a response to a transient body/world
+ * state, not a durable mission commitment across generation boundaries once a
+ * mandatory frontier has a directly executable first step.
+ *
+ * Preserve completed history and ordinary unfinished System2 intent, but retire
+ * only the narrowly typed recovery rows before restore. If those were the only
+ * unfinished rows, the ordinary queue_empty boundary asks System2 for a fresh
+ * WHAT. Code never selects the replacement and never consults RUNGS here.
+ */
+function reconsiderSystem2RecoverySnapshot(
+  snapshot: GoalQueueSnapshot,
+): System2RecoveryReconsideration {
+  const retired: Array<{ id: string; description: string }> = []
+  const goals = snapshot.goals.map((goal) => {
+    const unfinished = goal.status === 'active' || goal.status === 'pending'
+    if (!unfinished || !isReplaceableRecoveryGoal(goal)) return { ...goal }
+    retired.push({ id: goal.id, description: goal.description })
+    return {
+      ...goal,
+      status: 'impossible' as const,
+      detail: `${goal.detail === null ? '' : `${goal.detail} `}retired: generation boundary requires fresh System2 recovery reconsideration`,
+    }
+  })
+  return { snapshot: { ...snapshot, goals }, retired }
+}
+
 /** Select a consistent model-authored queue without ladder reconciliation. */
 export function selectSystem2LedgerSnapshot(
   hostSnapshot: GoalQueueSnapshot | null,
   derivedSnapshot: GoalQueueSnapshot | null,
   counts: Record<string, number>,
   world: ResidentWorldMemory,
-): { source: 'host-snapshot' | 'derived-file'; snapshot: GoalQueueSnapshot } | null {
+  readyFrontier: { item: string; description: string; firstCan: string } | null = null,
+): {
+  source: 'host-snapshot' | 'derived-file'
+  snapshot: GoalQueueSnapshot
+  reconsidered: Array<{ id: string; description: string }>
+} | null {
   if (hostSnapshot !== null) {
-    return ledgerIsConsistent(hostSnapshot, counts, world) && isSystem2MissionPlanIdentity(hostSnapshot.planIdentity)
-      ? { source: 'host-snapshot', snapshot: hostSnapshot }
-      : null
+    if (!ledgerIsConsistent(hostSnapshot, counts, world) || !isSystem2MissionPlanIdentity(hostSnapshot.planIdentity)) {
+      return null
+    }
+    const reconsidered = readyFrontier !== null
+      ? reconsiderSystem2RecoverySnapshot(hostSnapshot)
+      : { snapshot: hostSnapshot, retired: [] }
+    return { source: 'host-snapshot', snapshot: reconsidered.snapshot, reconsidered: reconsidered.retired }
   }
   if (
     derivedSnapshot !== null &&
     ledgerIsConsistent(derivedSnapshot, counts, world) &&
     isSystem2MissionPlanIdentity(derivedSnapshot.planIdentity)
   ) {
-    return { source: 'derived-file', snapshot: derivedSnapshot }
+    const reconsidered = readyFrontier !== null
+      ? reconsiderSystem2RecoverySnapshot(derivedSnapshot)
+      : { snapshot: derivedSnapshot, retired: [] }
+    return { source: 'derived-file', snapshot: reconsidered.snapshot, reconsidered: reconsidered.retired }
   }
   return null
 }
@@ -1787,6 +1833,7 @@ function restoreLedgerIntoController(
   world: ResidentWorldMemory,
   liveBasis: LedgerBasis,
   log: (event: string, detail?: Record<string, unknown>) => void,
+  readyFrontier: { item: string; description: string; firstCan: string } | null,
 ): void {
   let derivedSnapshot: GoalQueueSnapshot | null = null
   if (ledgerPath !== null && existsSync(ledgerPath)) {
@@ -1800,7 +1847,7 @@ function restoreLedgerIntoController(
   const chosen =
     plannerMode === 'deterministic'
       ? selectLedgerSnapshot(hostSnapshot, derivedSnapshot, counts, world)
-      : selectSystem2LedgerSnapshot(hostSnapshot, derivedSnapshot, counts, world)
+      : selectSystem2LedgerSnapshot(hostSnapshot, derivedSnapshot, counts, world, readyFrontier)
   if (chosen === null) {
     if (hostSnapshot !== null || derivedSnapshot !== null) {
       log('LEDGER_STALE', {
@@ -1828,7 +1875,10 @@ function restoreLedgerIntoController(
     return
   }
   try {
-    const holder = controller as unknown as { queue: { restore(snapshot: GoalQueueSnapshot): void } }
+    const holder = controller as unknown as {
+      queue: { restore(snapshot: GoalQueueSnapshot): void; readonly current: QueuedGoal | null }
+      recentEvents: string[]
+    }
     holder.queue.restore(chosen.snapshot)
     const goals = snapshotGoals(chosen.snapshot)
     const deterministicReconciliation =
@@ -1836,6 +1886,10 @@ function restoreLedgerIntoController(
     const reopened = deterministicReconciliation?.reopened ?? []
     const dominated = deterministicReconciliation?.dominated ?? []
     const achieved = deterministicReconciliation?.achieved ?? []
+    const reconsideredRecovery =
+      plannerMode === 'deterministic'
+        ? []
+        : (chosen as NonNullable<ReturnType<typeof selectSystem2LedgerSnapshot>>).reconsidered
     const done = goals.filter((goal) => goal.status === 'done').length
     const current = goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
     log('LEDGER_RESTORED', {
@@ -1854,6 +1908,17 @@ function restoreLedgerIntoController(
     })
     if (reopened.length > 0) {
       log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: reopened })
+    }
+    if (reconsideredRecovery.length > 0) {
+      log('SYSTEM2_RECOVERY_RECONSIDERED', {
+        reason: 'generation_boundary',
+        goals: reconsideredRecovery,
+        next: holder.queue.current?.id ?? 'queue_empty',
+        frontier: readyFrontier,
+      })
+      holder.recentEvents.push(
+        `restored optional recovery rows ${reconsideredRecovery.map((goal) => goal.id).join(',')} were retired because the current mandatory frontier ${readyFrontier?.description ?? 'unknown'} is directly startable; first CAN step=${readyFrontier?.firstCan ?? 'unknown'}. Reconsider the mission from live inventory and world facts.`,
+      )
     }
     // The mirror of the reopen above: an unfinished row whose world OUTCOME
     // already exists is finished work the ledger never observed as `done`, so it
@@ -2689,6 +2754,24 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // of planning a second obsidian collection/build after a respawn.
     portalFrameBlocks: Math.max(countSensedPortalFrameBlocks(ctx.bot), world.knownPortalSites.length > 0 ? 10 : 0),
   })
+  const liveLedgerBasis = ledgerBasisForLiveFrontier(liveWorldKey, ladder)
+  const frontierRung = RUNGS.find((rung) => rung.id === ladder.rungId)
+  const frontierGoal =
+    frontierRung !== undefined && isMandatoryRung(frontierRung) ? ladder.goals[0] ?? null : null
+  const frontierCraftStep =
+    frontierGoal?.kind === 'craft' && typeof frontierGoal.targetItem === 'string'
+      ? planNextCraftStep(
+          createRecipeIndex(ctx.bot.registry),
+          frontierGoal.targetItem,
+          counts,
+          false,
+          frontierGoal.requiredCount ?? 1,
+        ).op
+      : null
+  const frontierStepLabel =
+    frontierCraftStep?.type === 'craft' && !frontierCraftStep.requiresTable
+      ? `CRAFT:${frontierCraftStep.item}x${frontierCraftStep.count}`
+      : null
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
   }
@@ -2742,6 +2825,18 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const vtrReachProbe = process.env.BUDDY_VTR_REACH_PROBE?.trim() === '1'
   const configuredPlannerMode = resolvePlannerMode()
   const plannerMode = vtrReachProbe ? 'llm' : configuredPlannerMode
+  const readyFrontierReconsideration =
+    plannerMode !== 'deterministic' && frontierGoal !== null && frontierStepLabel !== null
+      ? { item: frontierGoal.targetItem as string, description: frontierGoal.description, firstCan: frontierStepLabel }
+      : null
+  if (readyFrontierReconsideration !== null) {
+    ctx.log('SYSTEM2_FRONTIER_READY_AT_RESTORE', {
+      frontier: readyFrontierReconsideration,
+      rungId: ladder.rungId,
+      rungIndex: ladder.rungIndex,
+      source: 'live inventory recipe closure',
+    })
+  }
   if (vtrReachProbe) {
     ctx.log('VTR_REACH_PROBE_CONFIGURED', {
       mission: { kind: 'inventory_at_least', item: ctx.goalItem, count: ctx.goalCount },
@@ -3134,7 +3229,6 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // otherwise a run that reached a rung through durable progress restores against
   // a stale floor. `liveWorldKey` is the same key the durable-progress read above
   // already uses, so there is one spelling of it.
-  const liveLedgerBasis: LedgerBasis = ledgerBasisForLiveFrontier(liveWorldKey, ladder)
   if (vtrReachProbe) {
     ctx.log('VTR_REACH_PROBE_QUEUE_EMPTY', {
       source: 'configured Mission',
@@ -3142,7 +3236,17 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       authority: 'vtr-transition-scheduler',
     })
   } else {
-    restoreLedgerIntoController(controller, plannerMode, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
+    restoreLedgerIntoController(
+      controller,
+      plannerMode,
+      ctx.ledgerSnapshot,
+      ledgerPath,
+      counts,
+      world,
+      liveLedgerBasis,
+      ctx.log,
+      readyFrontierReconsideration,
+    )
   }
   const brain = new PlannerBrain({
     bot,

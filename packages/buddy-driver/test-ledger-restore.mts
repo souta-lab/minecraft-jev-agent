@@ -5,8 +5,21 @@
 import { emptyWorldMemory } from './resident-types.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { GoalKind, GoalQueueSnapshot, GoalStatus, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
-import { evaluateLedgerRestoreBasis, ledgerBasisForLiveFrontier, ledgerIsConsistent, selectLedgerSnapshot } from './generation-entry.ts'
+import {
+  evaluateLedgerRestoreBasis,
+  ledgerBasisForLiveFrontier,
+  ledgerIsConsistent,
+  selectLedgerSnapshot,
+  selectSystem2LedgerSnapshot,
+  SYSTEM2_MISSION_PLAN_IDENTITY,
+} from './generation-entry.ts'
+import { createRecipeIndex, planNextCraftStep } from '../jev-agent/src/crafting.ts'
 import type { LedgerBasis } from '../jev-agent/src/goalQueue.ts'
+import { buildLadder, isMandatoryRung, RUNGS } from './planner.ts'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
+const recipes = createRecipeIndex(require('minecraft-data')('1.21.11') as unknown)
 
 interface Case {
   name: string
@@ -106,6 +119,77 @@ const BUG_LEDGER = ledgerOf([
 ])
 
 const cases: Case[] = [
+  {
+    name: 'restored optional model head gets one System2 reconsideration when the mandatory frontier has an inventory-ready first craft step',
+    expected: true,
+    observed: (() => {
+      const basis: LedgerBasis = {
+        worldKey: '127.0.0.1:26615|minecraft:overworld|1',
+        frontierRungId: 'iron_pickaxe',
+        frontierRungIndex: 9,
+      }
+      const stale = queued({
+        id: 'g5:explore',
+        kind: 'explore',
+        description: 'explore surface terrain',
+        targetItem: null,
+        status: 'active',
+        optionInstanceId: 'explore:surface',
+        optionTemplateId: 'explore:surface',
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      })
+      const food = queued({
+        id: 'g6:collect:food',
+        kind: 'collect',
+        description: 'collect food',
+        targetItem: 'food',
+        status: 'pending',
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      })
+      const saved: GoalQueueSnapshot = { counter: 6, goals: [stale, food], basis, planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY } }
+      const counts = { iron_ingot: 4, stick: 4, spruce_planks: 3, spruce_log: 1 }
+      const ladder = buildLadder(counts, emptyWorldMemory(), undefined, { resumeRungIndex: 9 })
+      const frontierRung = RUNGS.find((rung) => rung.id === ladder.rungId)
+      const frontierGoal = frontierRung !== undefined && isMandatoryRung(frontierRung) ? ladder.goals[0] ?? null : null
+      const first = frontierGoal?.targetItem === 'iron_pickaxe'
+        ? planNextCraftStep(recipes, frontierGoal.targetItem, counts, false, frontierGoal.requiredCount ?? 1).op
+        : null
+      const firstLabel = first?.type === 'craft' && !first.requiresTable ? `CRAFT:${first.item}x${first.count}` : null
+      const readyFrontier = firstLabel === null
+        ? null
+        : { item: frontierGoal?.targetItem ?? 'unknown', description: frontierGoal?.description ?? 'unknown', firstCan: firstLabel }
+      const afterPlanks = { ...counts, spruce_log: 0, spruce_planks: counts.spruce_planks + 4 }
+      const tableCraft = planNextCraftStep(recipes, 'iron_pickaxe', afterPlanks, false, 1).op
+      const afterTableCraft = { ...afterPlanks, spruce_planks: 3, crafting_table: 1 }
+      const tablePlace = planNextCraftStep(recipes, 'iron_pickaxe', afterTableCraft, false, 1).op
+      const afterTablePlace = { ...afterTableCraft, crafting_table: 0 }
+      const ironPickaxeCraft = planNextCraftStep(recipes, 'iron_pickaxe', afterTablePlace, true, 1).op
+      const unchanged = selectSystem2LedgerSnapshot(saved, null, counts, emptyWorldMemory())
+      const reconsidered = selectSystem2LedgerSnapshot(saved, null, counts, emptyWorldMemory(), readyFrontier)
+      const protectedSnapshot: GoalQueueSnapshot = {
+        ...saved,
+        goals: [{ ...stale, protected: true }, food],
+      }
+      const protectedSelection = selectSystem2LedgerSnapshot(protectedSnapshot, null, counts, emptyWorldMemory(), readyFrontier)
+      const queue = new GoalQueue()
+      if (reconsidered !== null) queue.restore(reconsidered.snapshot)
+      return (
+        firstLabel === 'CRAFT:spruce_planksx4' &&
+        ladder.rungId === 'iron_pickaxe' &&
+        frontierGoal?.targetItem === 'iron_pickaxe' &&
+        tableCraft?.type === 'craft' && tableCraft.item === 'crafting_table' &&
+        tablePlace?.type === 'place' && tablePlace.item === 'crafting_table' &&
+        ironPickaxeCraft?.type === 'craft' && ironPickaxeCraft.item === 'iron_pickaxe' && ironPickaxeCraft.requiresTable &&
+        unchanged?.reconsidered.length === 0 &&
+        unchanged?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'active' &&
+        reconsidered?.reconsidered.map((goal) => goal.id).join(',') === 'g5:explore,g6:collect:food' &&
+        reconsidered?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'impossible' &&
+        reconsidered?.snapshot.goals.find((goal) => goal.id === 'g6:collect:food')?.status === 'impossible' &&
+        protectedSelection?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'active' &&
+        queue.current === null
+      )
+    })(),
+  },
   {
     name: 'legacy unfinished ledger is not authoritative without a live frontier basis',
     expected: false,
