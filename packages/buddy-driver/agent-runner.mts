@@ -1252,6 +1252,31 @@ function inspectGenerationAuthority(gen: ResidentGeneration, trigger: string): {
     provider: status.system2AuthorityStack?.provider ?? status.system2Provider,
     model: status.system2AuthorityStack?.model ?? status.system2Model,
   }
+  for (const [authorityKind, actualAuthority] of [
+    ['jev', authority],
+    ['system2', system2Authority],
+  ] as const) {
+    const rebound = modelAvailability.rebindRecoverySourceForCleanBuild(
+      actualAuthority,
+      authorityKind,
+      status.sourceSha,
+      status.treeDirty,
+    )
+    if (rebound !== null) {
+      const availability = modelAvailability.snapshot()
+      log('MODEL_RECOVERY_SOURCE_REBOUND', {
+        runId,
+        generationId: gen.id,
+        trigger,
+        authorityKind,
+        authority: actualAuthority,
+        fromSourceSha: rebound.from,
+        sourceSha: rebound.to,
+        treeDirty: status.treeDirty,
+        lastFailureSourceSha: availability.lastFailure?.sourceSha ?? null,
+      })
+    }
+  }
   const jevAdmission = modelAvailability.admitGenerationAuthority(authority, 'jev', status.sourceSha)
   const system2Admission = modelAvailability.admitGenerationAuthority(system2Authority, 'system2', status.sourceSha)
   const recoveryKind = modelAvailability.snapshot().recoveryAuthorityKind

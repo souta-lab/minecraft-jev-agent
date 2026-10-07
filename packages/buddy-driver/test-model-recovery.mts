@@ -283,6 +283,57 @@ describe('model authority recovery host policy', () => {
     })
   })
 
+  test('a clean committed source change rebinds only the source fence for the same recovery authority', () => {
+    const tracker = new ModelAvailabilityTracker()
+    const free = { provider: 'liquid', model: 'd1:free' }
+    const otherModel = { provider: 'liquid', model: 'd1' }
+    const changedSourceSha = 'a'.repeat(40)
+    const t0 = Date.parse('2026-09-23T00:00:00.000Z')
+
+    expect(tracker.admitGenerationAuthority(free, 'jev', SOURCE_SHA).allowed).toBe(true)
+    tracker.recordUnavailable({
+      generationId: 'gen-old', context: 'jev-authority', attempts: 1,
+      error: 'rate_limited: d1:free temporarily unavailable',
+      authorityKind: 'jev', sourceSha: SOURCE_SHA,
+    }, t0)
+    expect(modelRecoveryStartGate(tracker.snapshot(), t0 + 1)).toMatchObject({ allowed: false, reason: 'retry-backoff' })
+    tracker.recordRetryStarted()
+
+    expect(tracker.rebindRecoverySourceForCleanBuild(free, 'jev', changedSourceSha, true)).toBeNull()
+    expect(tracker.rebindRecoverySourceForCleanBuild(otherModel, 'jev', changedSourceSha, false)).toBeNull()
+    expect(tracker.snapshot()).toMatchObject({ recoverySourceSha: SOURCE_SHA, recoveryAuthority: free })
+    expect(tracker.admitGenerationAuthority(free, 'jev', changedSourceSha)).toMatchObject({
+      allowed: false,
+      reason: 'source-mismatch',
+      expectedSourceSha: SOURCE_SHA,
+    })
+
+    expect(tracker.rebindRecoverySourceForCleanBuild(free, 'jev', changedSourceSha, false)).toEqual({
+      from: SOURCE_SHA,
+      to: changedSourceSha,
+    })
+    expect(tracker.snapshot()).toMatchObject({
+      state: 'degraded',
+      recoveryAuthorityKind: 'jev',
+      recoveryAuthority: free,
+      recoverySourceSha: changedSourceSha,
+      lastFailure: { sourceSha: SOURCE_SHA },
+    })
+    expect(tracker.admitGenerationAuthority(free, 'jev', changedSourceSha)).toMatchObject({
+      allowed: true,
+      reason: 'same-recovery-authority',
+    })
+    expect(tracker.admitGenerationAuthority(otherModel, 'jev', changedSourceSha)).toMatchObject({
+      allowed: false,
+      reason: 'model-mismatch',
+    })
+    expect(tracker.recordPolicyResponse(free, 'jev', t0 + 6_000)).toEqual({
+      accepted: true,
+      recovered: true,
+      reason: null,
+    })
+  })
+
   test('fault-injected outage recovery requires the pinned Jev identity at candidate start and response', () => {
     const tracker = new ModelAvailabilityTracker()
     const oldAuthority = { provider: 'typesafe-ai', model: 'typesafe-ai/jev' }
@@ -909,6 +960,14 @@ describe('model authority recovery host policy', () => {
     expect(generationEntry).toContain('sourceSha: ctx.sourceSha ?? null')
     expect(runner).toContain("admitGenerationAuthority(system2Authority, 'system2', status.sourceSha)")
     expect(runner).toContain('recoverySourceSha')
+    const authorityCheckStart = runner.indexOf('function inspectGenerationAuthority(')
+    const authorityCheckEnd = runner.indexOf('\nfunction logRejectedGenerationAuthority(', authorityCheckStart)
+    const runnerAuthorityCheck = runner.slice(authorityCheckStart, authorityCheckEnd)
+    expect(runnerAuthorityCheck).toContain('rebindRecoverySourceForCleanBuild')
+    expect(runnerAuthorityCheck).toContain('status.treeDirty')
+    expect(runnerAuthorityCheck.indexOf('rebindRecoverySourceForCleanBuild')).toBeLessThan(
+      runnerAuthorityCheck.indexOf("admitGenerationAuthority(authority, 'jev', status.sourceSha)"),
+    )
     const mercury = readFileSync(new URL('./mercury-system2.ts', import.meta.url), 'utf8')
     expect(mercury).toContain('if (cached !== undefined && !this.requireFreshProviderDecision)')
     const controller = readFileSync(new URL('../jev-agent/src/controller.ts', import.meta.url), 'utf8')

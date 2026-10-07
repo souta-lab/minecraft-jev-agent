@@ -292,6 +292,27 @@ export class ModelAvailabilityTracker {
     return moved
   }
 
+  /**
+   * A retry pin describes the source that observed the outage, but a clean
+   * committed source change must be eligible for a fresh evaluation under the
+   * same model authority. Rebind only that source fence; retain the pinned
+   * provider/model and the original failure record as historical evidence.
+   */
+  rebindRecoverySourceForCleanBuild(
+    actual: ModelAuthorityIdentity | null | undefined,
+    authorityKind: ModelAuthorityKind,
+    sourceSha: string | null | undefined,
+    treeDirty: boolean | undefined,
+  ): { from: string; to: string } | null {
+    if (this.state !== 'degraded' || this.recoveryAuthorityKind !== authorityKind || treeDirty !== false) return null
+    if (modelAuthorityIdentityMismatch(this.recoveryAuthority, actual) !== null) return null
+    const normalizedSourceSha = normalizeSourceSha(sourceSha)
+    const previousSourceSha = this.recoverySourceSha
+    if (previousSourceSha === null || normalizedSourceSha === null || previousSourceSha === normalizedSourceSha) return null
+    this.recoverySourceSha = normalizedSourceSha
+    return { from: previousSourceSha, to: normalizedSourceSha }
+  }
+
   recordUnavailable(
     failure: Omit<ModelFailureRecord, 'ts' | 'authority' | 'sourceSha'> & { ts?: string; authority?: ModelAuthorityIdentity | null; sourceSha?: string | null },
     nowMs = Date.now(),
