@@ -575,6 +575,7 @@ export function isSurvivalAnswerCandidate(candidate: Candidate): boolean {
     // typed route through the threat offer so starvation does not erase its
     // only way to reach the sensed producer.
     (typeof candidate.meta.foodRoute === 'string' && typeof candidate.meta.foodTarget === 'string') ||
+    candidate.meta.foodHabitat === true ||
     isDeathZoneEscapeRoute(candidate) ||
     // §4.1 world-shaping survival answers: `MOVE:escapeup:*` (a MOVE carrying
     // its own grounded pillar route) and `PLACE:wall:*` (a placement into the
@@ -1387,7 +1388,18 @@ export function restrictCandidatesDuringCriticalDamage(
 ): Candidate[] {
   const evidence = state.signals.criticalDamage ?? null
   if (evidence?.active !== true && !bodyStarving(state.self)) return [...candidates]
-  const rescue = damageEndingCandidates(candidates)
+  // `CRITICAL_DAMAGE_KINDS` includes every MOVE/STEP, which is appropriate
+  // while a separately attributed damage source can be escaped by moving. In a
+  // starvation-only state that broad set also admits generic exploration; p27.32
+  // measured d1 choosing those moves while a grounded `foodHabitat` ascent sat
+  // beside them. Use the shared tagged survival-answer predicate for starvation,
+  // which keeps grounded food routes, retreat/combat, and explicit escape
+  // affordances while leaving generic work movement out of the survival offer.
+  const starvationOnly =
+    bodyStarving(state.self) && (evidence?.active !== true || evidence.sourceName === null)
+  const rescue = starvationOnly
+    ? candidates.filter(isSurvivalAnswerCandidate)
+    : damageEndingCandidates(candidates)
   if (rescue.length === 0) return [...candidates]
   // Normal difficulty starvation bottoms out at 1 HP. Once the body is already
   // at that floor, a bounded local step mechanically derived from the CURRENT

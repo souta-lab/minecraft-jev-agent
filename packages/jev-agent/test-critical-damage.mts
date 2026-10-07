@@ -491,6 +491,78 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
   )
 }
 
+// p27.32 measured a stale explore:cave head at health=1/food=0 after the
+// habitat ascent became grounded. d1:free saw `ASCEND:habitat` beside generic
+// explore MOVEs and chose the latter twice because the starvation damage-ending
+// classifier recognized direct foodRoute/foodAnimal facts but not the existing
+// `foodHabitat` route fact. The model still chooses WHICH action within the
+// deterministic survival offer; this only removes non-food exploration while a
+// grounded route toward food exists.
+{
+  const state = hungryUndergroundWorld({ dirt: 1 })
+  const queued: QueuedGoal = {
+    ...queuedFood(),
+    id: 'g9:explore',
+    kind: 'explore',
+    description: 'explore cave terrain',
+    targetItem: 'explore',
+    requiredCount: 1,
+    optionInstanceId: 'explore:cave',
+    optionTemplateId: 'explore:cave',
+  }
+  state.goal = {
+    ...foodGoal(),
+    id: 'g9:explore',
+    description: 'explore cave terrain',
+    targetItem: 'explore',
+    requiredCount: 1,
+  }
+  state.goalQueue = queueWith(queued)
+  const habitat = foodHabitatAscent(state, defaultCandidateOptions).candidates[0]
+  const genericExplore: Candidate = {
+    id: 'MOVE:generic-explore',
+    kind: 'MOVE',
+    meta: { explore: true },
+  } as unknown as Candidate
+  const starvingOffer = habitat === undefined
+    ? []
+    : restrictCandidatesDuringCriticalDamage(state, [habitat, genericExplore])
+  const fed = {
+    ...state,
+    self: { ...state.self, health: 20, food: 20 },
+  }
+  const fedOffer = habitat === undefined
+    ? []
+    : restrictCandidatesDuringCriticalDamage(fed, [habitat, genericExplore])
+  const attributedDamage: CriticalDamageEvidence = {
+    planKey: 'g9:explore|g9:explore',
+    health: 1,
+    criticalHealth: 6,
+    consecutiveDamage: 1,
+    limit: 3,
+    food: 0,
+    sourceName: 'zombie',
+    active: true,
+    exhausted: false,
+    exhaustedRepeats: 0,
+  }
+  const damagedByMob = {
+    ...state,
+    signals: { ...state.signals, criticalDamage: attributedDamage },
+  }
+  const attributedDamageOffer = habitat === undefined
+    ? []
+    : restrictCandidatesDuringCriticalDamage(damagedByMob, [habitat, genericExplore])
+  check(
+    '(e2) starvation-only retains the grounded food-habitat ascent and removes generic exploration; fed and attributed-damage controls stay broad',
+    habitat?.meta.foodHabitat === true &&
+      starvingOffer.length === 1 && starvingOffer[0]?.id === habitat.id &&
+      fedOffer.length === 2 && fedOffer[0]?.id === habitat.id && fedOffer[1]?.id === genericExplore.id &&
+      attributedDamageOffer.length === 2 && attributedDamageOffer[0]?.id === habitat.id && attributedDamageOffer[1]?.id === genericExplore.id,
+    `habitat=${habitat?.id ?? 'none'} starving=[${starvingOffer.map((candidate) => candidate.id).join(' ')}] fed=[${fedOffer.map((candidate) => candidate.id).join(' ')}] attributedDamage=[${attributedDamageOffer.map((candidate) => candidate.id).join(' ')}]`,
+  )
+}
+
 // ---------------------------------------------------------------------------
 // (f) the CAN layer refuses work a starving body cannot finish, but keeps food
 // ---------------------------------------------------------------------------
