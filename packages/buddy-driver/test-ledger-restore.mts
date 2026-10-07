@@ -190,13 +190,15 @@ const cases: Case[] = [
         durableProgress,
         recipes,
       )
-      const first = frontierGoal?.targetItem === 'iron_pickaxe'
-        ? planNextCraftStep(recipes, frontierGoal.targetItem, counts, false, frontierGoal.requiredCount ?? 1).op
-        : null
-      const firstLabel = first?.type === 'craft' && !first.requiresTable ? `CRAFT:${first.item}x${first.count}` : null
-      const readyFrontier = firstLabel === null
+      const readyFrontier = opportunity === null
         ? null
-        : { item: frontierGoal?.targetItem ?? 'unknown', description: frontierGoal?.description ?? 'unknown', firstCan: firstLabel }
+        : {
+            item: opportunity.targetItem,
+            description: opportunity.description,
+            firstCan: opportunity.firstStep.type === 'place'
+              ? 'PLACE:crafting_table'
+              : `CRAFT:${opportunity.firstStep.item}x${opportunity.firstStep.count}`,
+          }
       const afterPlanks = { ...counts, spruce_log: 0, spruce_planks: counts.spruce_planks + 4 }
       const tableCraft = planNextCraftStep(recipes, 'iron_pickaxe', afterPlanks, false, 1).op
       const afterTableCraft = { ...afterPlanks, spruce_planks: 3, crafting_table: 1 }
@@ -205,6 +207,9 @@ const cases: Case[] = [
       const ironPickaxeCraft = planNextCraftStep(recipes, 'iron_pickaxe', afterTablePlace, true, 1).op
       const unchanged = selectSystem2LedgerSnapshot(saved, null, counts, emptyWorldMemory())
       const reconsidered = selectSystem2LedgerSnapshot(saved, null, counts, emptyWorldMemory(), readyFrontier)
+      const restoredBasis = reconsidered === null
+        ? { accept: false, reasons: ['snapshot_unavailable'] }
+        : evaluateSystem2LedgerRestoreBasis(reconsidered.snapshot, basis)
       const protectedSnapshot: GoalQueueSnapshot = {
         ...saved,
         goals: [{ ...stale, protected: true }, food],
@@ -213,7 +218,7 @@ const cases: Case[] = [
       const queue = new GoalQueue()
       if (reconsidered !== null) queue.restore(reconsidered.snapshot)
       return (
-        firstLabel === 'CRAFT:spruce_planksx4' &&
+        readyFrontier?.firstCan === 'CRAFT:spruce_planksx4' &&
         ladder.rungId === 'iron_pickaxe' &&
         frontierGoal?.targetItem === 'iron_pickaxe' &&
         opportunity?.targetItem === 'iron_pickaxe' &&
@@ -225,6 +230,7 @@ const cases: Case[] = [
         ironPickaxeCraft?.type === 'craft' && ironPickaxeCraft.item === 'iron_pickaxe' && ironPickaxeCraft.requiresTable &&
         unchanged?.reconsidered.length === 0 &&
         unchanged?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'active' &&
+        restoredBasis.accept &&
         reconsidered?.reconsidered.map((goal) => goal.id).join(',') === 'g5:explore,g6:collect:food' &&
         reconsidered?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'impossible' &&
         reconsidered?.snapshot.goals.find((goal) => goal.id === 'g6:collect:food')?.status === 'impossible' &&
