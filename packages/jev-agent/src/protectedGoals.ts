@@ -82,7 +82,7 @@ export function isReplaceableOptionalFoodGoal(goal: ProtectableGoal): boolean {
  */
 export function isReplaceableRecoveryGoal(goal: ProtectableGoal): boolean {
   if (isReplaceableOptionalFoodGoal(goal)) return true
-  if (goal.protected === true || goal.core === true || goal.kind !== 'explore') return false
+  if (goal.protected === true || goal.kind !== 'explore') return false
   const ids = [
     goal.semanticOptionInstanceId,
     goal.semanticOptionTemplateId,
@@ -92,6 +92,10 @@ export function isReplaceableRecoveryGoal(goal: ProtectableGoal): boolean {
     goal.optionSpec?.semanticOptionTemplateId,
     goal.optionSpec?.id,
   ]
+  // A stale surface-recovery Option can carry `core=true` from the frontier it
+  // was authored against. Its explicit semantic identity still makes it a
+  // replaceable recovery row once the live mandatory frontier is startable;
+  // `protected` remains the hard boundary for explicit prerequisites.
   return ids.some((id) => id === 'explore:surface' || id?.startsWith('explore:surface#') === true)
 }
 

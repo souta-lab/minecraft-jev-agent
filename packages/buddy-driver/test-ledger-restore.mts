@@ -398,6 +398,87 @@ const cases: Case[] = [
     })(),
   },
   {
+    name: 'ready mandatory frontier retires a legacy-core surface recovery without changing System2 authority',
+    expected: true,
+    observed: (() => {
+      const basis: LedgerBasis = {
+        worldKey: '127.0.0.1:26615|minecraft:overworld|1',
+        frontierRungId: 'iron_pickaxe',
+        frontierRungIndex: 9,
+      }
+      const stale = queued({
+        id: 'g5:explore',
+        kind: 'explore',
+        description: 'explore surface terrain',
+        targetItem: null,
+        status: 'active',
+        core: true,
+        optionInstanceId: 'explore:surface',
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      })
+      const saved: GoalQueueSnapshot = {
+        counter: 5,
+        goals: [stale],
+        basis,
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      }
+      const counts = {
+        iron_ingot: 4,
+        stick: 4,
+        spruce_planks: 3,
+        spruce_log: 1,
+        crafting_table: 0,
+        furnace: 1,
+      }
+      const liveWorld = emptyWorldMemory()
+      liveWorld.craftingTables.push({ x: 7197, y: 1, z: 1278, status: 'verified' })
+      liveWorld.furnaces.push({ x: 7202, y: 3, z: 1280, status: 'verified' })
+      const mandatory = {
+        kind: 'craft' as const,
+        targetItem: 'iron_pickaxe',
+        requiredCount: 1,
+        description: 'craft 1 x iron_pickaxe',
+      }
+      const durableProgress: DurableLadderProgress = {
+        rungId: 'iron_ingot',
+        rungIndex: 8,
+        sources: ['ledger-basis'],
+        evidence: ['basis:frontier=iron_pickaxe@9'],
+      }
+      const opportunity = system2FrontierOpportunity(
+        mandatory,
+        { rungId: basis.frontierRungId, rungIndex: basis.frontierRungIndex },
+        counts,
+        liveWorld,
+        durableProgress,
+        recipes,
+      )
+      const readyFrontier = opportunity === null
+        ? null
+        : {
+            item: opportunity.targetItem,
+            description: opportunity.description,
+            firstCan: opportunity.firstStep.type === 'place'
+              ? 'PLACE:crafting_table'
+              : `CRAFT:${opportunity.firstStep.item}x${opportunity.firstStep.count}`,
+          }
+      const selected = selectSystem2LedgerSnapshot(saved, null, counts, liveWorld, readyFrontier)
+      const unchangedWithoutOpportunity = selectSystem2LedgerSnapshot(saved, null, counts, liveWorld)
+      const queue = new GoalQueue()
+      if (selected !== null) queue.restore(selected.snapshot)
+      return (
+        opportunity?.targetItem === 'iron_pickaxe' &&
+        readyFrontier?.firstCan === 'CRAFT:spruce_planksx4' &&
+        evaluateSystem2LedgerRestoreBasis(saved, basis).accept &&
+        selected?.reconsidered.map((goal) => goal.id).join(',') === 'g5:explore' &&
+        selected.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'impossible' &&
+        unchangedWithoutOpportunity?.reconsidered.length === 0 &&
+        unchangedWithoutOpportunity?.snapshot.goals.find((goal) => goal.id === 'g5:explore')?.status === 'active' &&
+        queue.current === null
+      )
+    })(),
+  },
+  {
     name: 'legacy unfinished ledger is not authoritative without a live frontier basis',
     expected: false,
     observed: evaluateLedgerRestoreBasis(snapshot('collect', 'log'), {
