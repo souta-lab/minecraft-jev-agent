@@ -9427,6 +9427,49 @@ function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | n
   return best
 }
 
+/**
+ * A restored/model-authored `place:<station>` row may be the explicit first
+ * step of the immediately following craft row. Keep the starvation-floor
+ * exception scoped to that live queue edge: the held station must be the
+ * recipe planner's next operation for the non-optional craft goal. This only
+ * changes whether an already-grounded PLACE is offered; the typed decision
+ * plane still chooses it, and normal placement guards still own geometry.
+ */
+function isImmediateQueuedCraftStationPlacement(
+  state: WorldState,
+  options: CandidateOptions,
+  stationItem: string,
+): boolean {
+  const current = state.goalQueue.current
+  if (
+    current === null ||
+    current.kind !== 'place' ||
+    current.targetItem !== stationItem ||
+    current.optional === true ||
+    current.requiredCount !== 1 ||
+    (current.placementCells !== undefined && current.placementCells.length !== 1)
+  ) return false
+
+  const currentIndex = state.goalQueue.goals.findIndex((goal) => goal.id === current.id)
+  if (currentIndex < 0) return false
+  const next = state.goalQueue.goals
+    .slice(currentIndex + 1)
+    .find((goal) => goal.status === 'active' || goal.status === 'pending')
+  if (next?.kind !== 'craft' || next.optional === true || next.targetItem === null) return false
+
+  const recipes = options.recipes ?? null
+  if (recipes === null) return false
+  const tableAvailable = sensedCraftingTableAvailable(state, options, next.targetItem)
+  const step = planNextCraftStep(
+    recipes,
+    next.targetItem,
+    state.inventory.counts,
+    tableAvailable,
+    Math.max(1, Math.floor(next.requiredCount)),
+  ).op
+  return step?.type === 'place' && step.item === stationItem
+}
+
 function explicitPlacementCells(state: WorldState): Vec3Json[] | null {
   const cells = state.goalQueue?.current?.placementCells ?? null
   if (cells === null || cells.length === 0) return null
@@ -9507,10 +9550,11 @@ export function frameBuildGrounded(state: WorldState, focusItem: string): boolea
  */
 function placeCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
+  const localMandatoryCraftRecovery = isImmediateQueuedCraftStationPlacement(state, options, focusItem)
   // SAFE mirrors guardPlace's STARVING rule at the offer side: a station
   // placement that cannot end starvation is rejected by the guard anyway, so
   // offering it only spins a commit->STARVING->reject loop.
-  if (starvingDeniedPlace(state, focusItem)) return []
+  if (starvingDeniedPlace(state, focusItem, localMandatoryCraftRecovery)) return []
   // A placement family whose bounded attempts are exhausted must not be
   // re-offered: the ledger already retired it with a typed PLACE_RETRIES_EXHAUSTED.
   if (options.retiredPlaceItems?.has(focusItem) === true) return []
@@ -9547,6 +9591,7 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
           y: target?.y ?? 0,
           z: target?.z ?? 0,
           placementCount: sequence.length,
+          ...(localMandatoryCraftRecovery ? { localMandatoryCraftRecovery: true } : {}),
         },
       },
     ]
@@ -9581,6 +9626,7 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
         y: spot.y,
         z: spot.z,
         ...(asContainer === null ? {} : { containerPlacement: asContainer }),
+        ...(localMandatoryCraftRecovery ? { localMandatoryCraftRecovery: true } : {}),
       },
     },
   ]

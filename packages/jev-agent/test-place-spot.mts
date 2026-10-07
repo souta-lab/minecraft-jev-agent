@@ -27,7 +27,7 @@ import {
 } from './src/candidates.ts'
 import type { Candidate, CandidateOptions, PlaceRefusal } from './src/candidates.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
-import { createRecipeIndex } from './src/crafting.ts'
+import { createRecipeIndex, planNextCraftStep } from './src/crafting.ts'
 import { guardCandidate } from './src/policy.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -249,6 +249,136 @@ const productive = (candidates: readonly Candidate[]): Candidate[] =>
     '(1a-floor) an optional craft does not receive the mandatory-recovery exemption',
     optionalStep === undefined || optionalStep.meta.localMandatoryCraftRecovery !== true,
     `optional=${optionalStep?.id ?? 'none'} marker=${String(optionalStep?.meta.localMandatoryCraftRecovery ?? false)}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (1a-split-queue) a place row is locally recoverable when its next craft row
+// mechanically needs exactly that held station.
+// ---------------------------------------------------------------------------
+{
+  const neighbour: Vec3Json = { x: 2, y: 64, z: 0 }
+  const tableGoal: QueuedGoal = {
+    ...craftGoal('crafting_table'),
+    id: 'g7:place:crafting_table',
+    kind: 'place',
+    description: 'place crafting_table for iron_pickaxe',
+    status: 'active',
+  }
+  const pickaxeGoal: QueuedGoal = {
+    ...craftGoal('iron_pickaxe'),
+    id: 'g8:craft:iron_pickaxe',
+    status: 'pending',
+  }
+  const queue: GoalQueueState = {
+    ...emptyGoalQueueState(),
+    depth: 2,
+    current: tableGoal,
+    empty: false,
+    goals: [tableGoal, pickaxeGoal],
+  }
+  const state = heldTableInTunnel([neighbour], {
+    health: 1,
+    food: 0,
+    inventory: inventory({ iron_ingot: 4, stick: 4, spruce_planks: 3, crafting_table: 1 }),
+    placementSpots: [neighbour],
+    goalQueue: queue,
+  })
+  const grounded = generateGroundedCandidates(state, options)
+  const place = grounded.candidates.find((candidate) => candidate.kind === 'PLACE' && candidate.itemName === 'crafting_table')
+  const guard =
+    place === undefined
+      ? null
+      : guardCandidate(place, state, {
+          phase: 'decision',
+          candidateIds: new Set(grounded.candidates.map((candidate) => candidate.id)),
+          inFlight: null,
+          reach: options.reach,
+          maxCandidateAgeTicks: 40,
+        })
+  const afterPlacement = planNextCraftStep(
+    recipeIndex,
+    'iron_pickaxe',
+    { iron_ingot: 4, stick: 4, spruce_planks: 3 },
+    true,
+    1,
+  ).op
+  check(
+    '(1a-split-queue) health1/food0 offers and guard-admits only the grounded table step for the immediately queued iron_pickaxe craft',
+    place !== undefined && place.meta.localMandatoryCraftRecovery === true && guard?.ok === true,
+    `place=${place?.id ?? 'none'} marker=${String(place?.meta.localMandatoryCraftRecovery ?? false)} guard=${guard === null ? 'none' : guard.ok ? 'ok' : guard.code}`,
+  )
+  check(
+    '(1a-split-queue) held iron_ingot and sticks make iron_pickaxe the next local craft after placement',
+    afterPlacement?.type === 'craft' && afterPlacement.item === 'iron_pickaxe' && afterPlacement.requiresTable,
+    `next=${afterPlacement === null ? 'none' : JSON.stringify(afterPlacement)}`,
+  )
+
+  const optionalQueue: GoalQueueState = {
+    ...queue,
+    goals: [tableGoal, { ...pickaxeGoal, optional: true }],
+  }
+  const optionalState = heldTableInTunnel([neighbour], {
+    health: 1,
+    food: 0,
+    inventory: inventory({ iron_ingot: 4, stick: 4, spruce_planks: 3, crafting_table: 1 }),
+    placementSpots: [neighbour],
+    goalQueue: optionalQueue,
+  })
+  const optionalPlace = generateGroundedCandidates(optionalState, options).candidates.find(
+    (candidate) => candidate.kind === 'PLACE' && candidate.itemName === 'crafting_table',
+  )
+  check(
+    '(1a-split-queue) an explicitly optional following craft does not open the starvation-floor exception',
+    optionalPlace === undefined || optionalPlace.meta.localMandatoryCraftRecovery !== true,
+    `optional=${optionalPlace?.id ?? 'none'} marker=${String(optionalPlace?.meta.localMandatoryCraftRecovery ?? false)}`,
+  )
+
+  const unrelatedGoal: QueuedGoal = {
+    ...craftGoal('oak_planks'),
+    id: 'g8:craft:oak_planks',
+    status: 'pending',
+  }
+  const unrelatedState = heldTableInTunnel([neighbour], {
+    health: 1,
+    food: 0,
+    inventory: inventory({ spruce_log: 1, spruce_planks: 3, crafting_table: 1 }),
+    placementSpots: [neighbour],
+    goalQueue: { ...queue, goals: [tableGoal, unrelatedGoal] },
+  })
+  const unrelatedPlace = generateGroundedCandidates(unrelatedState, options).candidates.find(
+    (candidate) => candidate.kind === 'PLACE' && candidate.itemName === 'crafting_table',
+  )
+  check(
+    '(1a-split-queue) a following craft whose recipe does not need a placed table gets no exception',
+    unrelatedPlace === undefined || unrelatedPlace.meta.localMandatoryCraftRecovery !== true,
+    `unrelated=${unrelatedPlace?.id ?? 'none'} marker=${String(unrelatedPlace?.meta.localMandatoryCraftRecovery ?? false)}`,
+  )
+
+  const far: Vec3Json = { x: 9, y: 64, z: 0 }
+  const unsafeState = heldTableInTunnel([far], {
+    health: 1,
+    food: 0,
+    inventory: inventory({ iron_ingot: 4, stick: 4, spruce_planks: 3, crafting_table: 1 }),
+    placementSpots: [far],
+    goalQueue: queue,
+  })
+  const unsafeGrounded = generateGroundedCandidates(unsafeState, options)
+  const unsafePlace = unsafeGrounded.candidates.find((candidate) => candidate.kind === 'PLACE' && candidate.itemName === 'crafting_table')
+  const unsafeGuard =
+    unsafePlace === undefined
+      ? null
+      : guardCandidate(unsafePlace, unsafeState, {
+          phase: 'decision',
+          candidateIds: new Set(unsafeGrounded.candidates.map((candidate) => candidate.id)),
+          inFlight: null,
+          reach: options.reach,
+          maxCandidateAgeTicks: 40,
+        })
+  check(
+    '(1a-split-queue) the recovery marker does not bypass the ordinary out-of-reach placement guard',
+    unsafePlace?.meta.localMandatoryCraftRecovery === true && unsafeGuard?.ok === false && unsafeGuard.code === 'OUT_OF_REACH',
+    `place=${unsafePlace?.id ?? 'none'} guard=${unsafeGuard === null ? 'none' : unsafeGuard.ok ? 'ok' : unsafeGuard.code}`,
   )
 }
 
