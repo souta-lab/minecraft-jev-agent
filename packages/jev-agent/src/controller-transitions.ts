@@ -19,13 +19,6 @@ import { controllerTransitionToKernelSpec } from './reach/kernel-authority-map.t
 import type { KernelTransitionAuthority } from './reach/kernel-authority-map.ts'
 import { committedSkillKind, declaredPostconditions, postconditionHash } from './skillCommitment.ts'
 
-/** Kernel EffectKind for each candidate-declared internal effect type. */
-const INTERNAL_EFFECT_KERNEL_KIND = {
-  dig: 'DIG',
-  place: 'PLACE',
-  equip: 'EQUIP',
-} as const
-
 /** Per-dispatch budget envelope for a controller transition. */
 const CONTROLLER_MAX_MECHANICAL_STEPS = 512
 const CONTROLLER_MAX_ACTIVE_MS = 15 * 60_000
@@ -166,7 +159,7 @@ export class ControllerTransitions {
             transitionId,
             intentId: transitionId,
             stepId: reservation.effectId,
-            effectKind: INTERNAL_EFFECT_KERNEL_KIND[reservation.effect.type],
+            effectKind: reservation.kernelEffectKind,
           }).ok,
         after: (settlement) => {
           authority.settleStepEffect({

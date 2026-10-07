@@ -14,6 +14,7 @@
 import { createKernelAuthoritySession } from '../buddy-driver/kernel-authority-session.ts'
 import type { KernelAuthoritySession } from '../buddy-driver/kernel-authority-session.ts'
 import type { Candidate } from './src/candidates.ts'
+import type { InternalEffectReservation } from './src/executor.ts'
 import { ControllerTransitions } from './src/controller-transitions.ts'
 import type { ControllerTransitionExecutor } from './src/controller-transitions.ts'
 
@@ -42,6 +43,23 @@ function moveCandidate(id: string, x: number): Candidate {
     inReach: false,
     hasStandableAdjacent: true,
     meta: {},
+  }
+}
+
+function tableCraftCandidate(): Candidate {
+  return {
+    id: 'CRAFT:iron_pickaxe',
+    kind: 'CRAFT',
+    label: 'craft 1 x iron_pickaxe at the local table',
+    targetName: null,
+    target: { x: 1, y: 64, z: 0 },
+    targetEntityId: null,
+    itemName: 'iron_pickaxe',
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { requiresTable: true },
   }
 }
 
@@ -157,6 +175,53 @@ addCase('re-dispatching the running candidate reuses its admitted transition', (
   const again = transitions.admit(moveCandidate('A', 5), 'overworld')
   const pass = again !== null && again.reused && again.transitionId === first.transitionId
   return { pass, detail: `reused=${again?.reused} same=${again?.transitionId === first.transitionId}` }
+})
+
+addCase('table crafting reservation issues the Kernel CRAFT effect before bot.openBlock mutation', () => {
+  const { session, transitions } = setup()
+  const candidate = tableCraftCandidate()
+  const admission = transitions.admit(candidate, 'overworld')
+  if (admission === null) return { pass: false, detail: 'craft admission denied' }
+  const context = {
+    actionId: candidate.id,
+    epoch: 1,
+    authority: 'controller:craft',
+    transitionId: admission.transitionId,
+    transitionContractHash: admission.contractHash,
+  }
+  session.bindActuationContext(() => context)
+  const callbacks = transitions.claimProvenance(admission).internalEffectCallbacks
+  if (callbacks === undefined) return { pass: false, detail: 'controller claim omitted effect callbacks' }
+  const reservation: InternalEffectReservation = {
+    actionId: candidate.id,
+    actionEpoch: 1,
+    transitionId: admission.transitionId,
+    effectId: `${candidate.id}:effect:table-craft`,
+    kernelEffectKind: 'CRAFT',
+    effect: { type: 'station', station: 'crafting_table' },
+  }
+  const contract = session.state().contracts[admission.contractHash]
+  const hasCraftPermit = contract?.effects.some((effect) => effect.kind === 'CRAFT') === true
+  const issuedBeforeOpen = callbacks.before(reservation)
+  const dispatching = Object.values(session.state().effects).some((effect) =>
+    effect.transitionId === admission.transitionId && effect.effect === 'CRAFT' && effect.status === 'DISPATCHING')
+  session.observeMutation({
+    surface: 'bot.openBlock',
+    guarded: true,
+    leaseOutcome: 'granted',
+    argsSignature: ['block:crafting_table@1,64,0'],
+    instanceHint: '1,64,0',
+  })
+  callbacks.after({ ...reservation, outcome: { status: 'actuator-returned' } })
+  const summary = session.summary()
+  const pass = hasCraftPermit && issuedBeforeOpen && dispatching &&
+    summary.mutationsObserved === 1 && summary.mutationsMapped === 1 &&
+    summary.mutationsAttributedToTransition === 1 && summary.mutationsDeniedByLease === 0 &&
+    summary.gateDenials.length === 0 && summary.blockers.length === 0
+  return {
+    pass,
+    detail: `craftPermit=${hasCraftPermit} issuedBeforeOpen=${issuedBeforeOpen} dispatching=${dispatching} attributed=${summary.mutationsAttributedToTransition} blockers=${summary.blockers.length}`,
+  }
 })
 
 let failures = 0

@@ -29,7 +29,8 @@ import type { Bot } from 'mineflayer'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import * as executorModule from './src/executor.ts'
 import type { Candidate, Vec3Json } from './src/index.ts'
-import { fixtureClaim } from './test-claim-context.mts'
+import type { InternalEffectActuationOutcome, InternalEffectReservation } from './src/executor.ts'
+import { fixtureClaim, fixtureClaimContext } from './test-claim-context.mts'
 
 const require = createRequire(import.meta.url)
 const registry = require('minecraft-data')('1.21.11')
@@ -83,6 +84,7 @@ interface FakeBlock {
 interface StationBotFixture {
   bot: Bot
   openCalls: Array<Vec3Json | null>
+  mutationTrace: string[]
   table: FakeBlock
 }
 
@@ -91,7 +93,7 @@ interface StationBotFixture {
  * the entity feet, the registry, a stub pathfinder and an `openBlock` that
  * records the direction it was given. `blocks` maps "x,y,z" → block name.
  */
-function makeStationBot(feet: Vec3Json, blocks: Map<string, string>, withFloor: boolean): StationBotFixture {
+function makeStationBot(feet: Vec3Json, blocks: Map<string, string>, withFloor: boolean, mutationTrace: string[] = []): StationBotFixture {
   const key = (x: number, y: number, z: number): string => `${x},${y},${z}`
   const position = new P(feet.x, feet.y, feet.z)
   const openCalls: Array<Vec3Json | null> = []
@@ -141,6 +143,7 @@ function makeStationBot(feet: Vec3Json, blocks: Map<string, string>, withFloor: 
       { requiresTable: true, result: { id: resultId, count: 1 }, inShape: [[{ id: 1, count: 1, metadata: null }]], outShape: null },
     ],
     openBlock: async (_block: unknown, direction?: { x: number; y: number; z: number }): Promise<unknown> => {
+      mutationTrace.push('bot.openBlock')
       openCalls.push(direction === undefined ? null : { x: direction.x, y: direction.y, z: direction.z })
       opened = true
       const win = {
@@ -160,9 +163,9 @@ function makeStationBot(feet: Vec3Json, blocks: Map<string, string>, withFloor: 
       }
       return win
     },
-    clickWindow: async () => undefined,
-    putSelectedItemRange: async () => undefined,
-    closeWindow: async () => undefined,
+    clickWindow: async () => { mutationTrace.push('bot.clickWindow') },
+    putSelectedItemRange: async () => { mutationTrace.push('bot.putSelectedItemRange') },
+    closeWindow: async () => { mutationTrace.push('bot.closeWindow') },
     pathfinder: {
       movements: null as unknown,
       setMovements: (movements: unknown) => {
@@ -174,7 +177,7 @@ function makeStationBot(feet: Vec3Json, blocks: Map<string, string>, withFloor: 
     },
   }
 
-  return { bot: bot as unknown as Bot, openCalls, table }
+  return { bot: bot as unknown as Bot, openCalls, mutationTrace, table }
 }
 
 function craftCandidate(): Candidate {
@@ -222,6 +225,70 @@ function walledTableTerrain(): Map<string, string> {
   }
   return blocks
 }
+
+// A CRAFT at a table is a compound actuator: station open, recipe window
+// clicks, and station close. The executor must reserve its declared Kernel
+// CRAFT effect before the first of those mutations and settle only after the
+// whole table operation returns.
+addCase('(b4) table crafting mutations are inside one Kernel CRAFT dispatch', async () => {
+  const trace: string[] = []
+  const fixture = makeStationBot({ x: 0.5, y: 64, z: 0.5 }, openTableTerrain(), true, trace)
+  const executor = new Executor(fixture.bot, new EventLogger(null, false), {
+    ...defaultExecutorOptions,
+    actuation: 'packet',
+    packetStepMs: 1,
+    maxStepsPerWaypoint: 5,
+  })
+  const candidate = craftCandidate()
+  const reservations: InternalEffectReservation[] = []
+  const settlements: Array<InternalEffectReservation & { outcome: InternalEffectActuationOutcome }> = []
+  const claimed = executor.claim(candidate, {
+    ...fixtureClaimContext(candidate),
+    internalEffectCallbacks: {
+      before: (reservation) => {
+        reservations.push(reservation)
+        trace.push(`kernel-dispatch:${reservation.kernelEffectKind}`)
+        return true
+      },
+      after: (settlement) => {
+        settlements.push(settlement)
+        trace.push(`kernel-settled:${settlement.outcome.status}`)
+      },
+    },
+  })
+  const result = await claimed.completion
+  const dispatchAt = trace.indexOf('kernel-dispatch:CRAFT')
+  const openAt = trace.indexOf('bot.openBlock')
+  const settledAt = trace.indexOf('kernel-settled:actuator-returned')
+  const mutations = trace.flatMap((event, index) => event.startsWith('bot.') ? [index] : [])
+  const pass = result.status === 'done' && result.itemsGained === 1 &&
+    reservations.length === 1 && settlements.length === 1 &&
+    reservations[0]?.effect.type === 'station' && reservations[0]?.effect.station === 'crafting_table' &&
+    reservations[0]?.kernelEffectKind === 'CRAFT' &&
+    dispatchAt >= 0 && openAt > dispatchAt && settledAt > openAt &&
+    mutations.length >= 3 && mutations.every((index) => index > dispatchAt && index < settledAt)
+  return { pass, detail: `status=${result.status} dispatch=${reservations[0]?.kernelEffectKind ?? 'none'} trace=${trace.join('>')}` }
+})
+
+addCase('(b5) a refused Kernel CRAFT dispatch prevents opening the table', async () => {
+  const trace: string[] = []
+  const fixture = makeStationBot({ x: 0.5, y: 64, z: 0.5 }, openTableTerrain(), true, trace)
+  const executor = new Executor(fixture.bot, new EventLogger(null, false), {
+    ...defaultExecutorOptions,
+    actuation: 'packet',
+    packetStepMs: 1,
+    maxStepsPerWaypoint: 5,
+  })
+  const candidate = craftCandidate()
+  const claimed = executor.claim(candidate, {
+    ...fixtureClaimContext(candidate),
+    internalEffectCallbacks: { before: () => false, after: () => { trace.push('unexpected-settle') } },
+  })
+  const result = await claimed.completion
+  const pass = result.status === 'failed' && result.failure === 'effect_reservation_refused' &&
+    fixture.openCalls.length === 0 && fixture.mutationTrace.length === 0 && !trace.includes('unexpected-settle')
+  return { pass, detail: `failure=${result.failure} openCalls=${fixture.openCalls.length} mutations=${fixture.mutationTrace.length}` }
+})
 
 // (a) below/offset, no valid stand -> typed fail, never a blind openBlock.
 addCase('(a) a table with the bot below/offset and no valid stand fails path_stuck and never opens the table', async () => {

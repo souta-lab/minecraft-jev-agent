@@ -16,6 +16,7 @@ import type { Bot, EquipmentDestination } from 'mineflayer'
 import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { Item } from 'prismarine-item'
+import type { EffectKind as KernelEffectKind } from '../../kernel/kernel.ts'
 import { observedAir } from './air.ts'
 import type { Candidate, CandidateKind } from './candidates.ts'
 import { declaredDigCells, digsBotSupport, formatDigDownRefused, parseWaterRouteWitness } from './candidates.ts'
@@ -527,7 +528,14 @@ export interface CurrentAction {
 }
 
 /** Internal effects whose exact candidate declaration is checked by the executor. */
-export type CandidateDeclaredInternalEffect = Extract<Effect, { type: 'dig' | 'place' | 'equip' }>
+export type CandidateDeclaredInternalEffect = Extract<Effect, { type: 'dig' | 'place' | 'equip' | 'station' }>
+
+const INTERNAL_EFFECT_KERNEL_KIND: Readonly<Record<CandidateDeclaredInternalEffect['type'], KernelEffectKind>> = {
+  dig: 'DIG',
+  place: 'PLACE',
+  equip: 'EQUIP',
+  station: 'INTERACT',
+}
 
 /** Stable identity passed to the VTR budget/journal at an internal mutation boundary. */
 export interface InternalEffectReservation {
@@ -535,6 +543,8 @@ export interface InternalEffectReservation {
   readonly actionEpoch: number
   readonly transitionId: string | null
   readonly effectId: string
+  /** Kernel permit used for this dispatch; may be a compound operation such as table CRAFT. */
+  readonly kernelEffectKind: KernelEffectKind
   readonly effect: Readonly<CandidateDeclaredInternalEffect>
 }
 
@@ -3015,6 +3025,7 @@ export class Executor {
   private async performInternalEffect<T>(
     effect: CandidateDeclaredInternalEffect,
     actuator: () => Promise<T>,
+    kernelEffectKind: KernelEffectKind = INTERNAL_EFFECT_KERNEL_KIND[effect.type],
   ): Promise<T> {
     this.assertEffect(effect, false)
     const action = this.action
@@ -3050,6 +3061,7 @@ export class Executor {
       actionEpoch: action.epoch,
       transitionId: action.transitionId ?? null,
       effectId,
+      kernelEffectKind,
       effect: immutableEffect,
     })
 
@@ -8378,8 +8390,11 @@ export class Executor {
         this.ensureOwned(epoch, signal)
         const face = deriveInteractionFace(stand, station)
         const faceVec = this.bot.entity.position.clone().set(face.x, face.y, face.z)
-        this.assertEffect({ type: 'station', station: 'crafting_table' })
-        await craftAtTable(this.bot, table, recipe as unknown as CraftRecipeLike, faceVec)
+        await this.performInternalEffect(
+          { type: 'station', station: 'crafting_table' },
+          () => craftAtTable(this.bot, table, recipe as unknown as CraftRecipeLike, faceVec),
+          'CRAFT',
+        )
       }
       this.ensureOwned(epoch, signal)
       after = this.countItem(itemName)
