@@ -98,7 +98,7 @@ import { DESPERATION_EDIBLES, FOOD_SMELT_INPUT, fuelCountFor, loadGameData, reso
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, interactionFaceDistance, missingToolCapability, reachabilityFingerprint, reachabilityTargetSignature } from './reachability.ts'
 import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
-import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
+import { moveFailureKey, samePosition, StateFingerprintMemory } from './moveFailMemory.ts'
 import type { BlacklistedMoveTargets } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, inventoryClassCount, inventoryCount, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
@@ -7628,6 +7628,15 @@ function stepOverheadCandidates(
   const name = observedCutName(state, cell)
   if (name === null || name === 'unknown') return []
   if (protectedResourceTest(state)(cell, name)) return []
+  // The same cell-level verdict the MINE guard applies (`policy.ts`
+  // `headroomCuts[].pos` -> `!cut.safe` -> NO_SUPPORT): a named overhead cell
+  // whose own cut probe already refused it (flood dam, unbreakable, hazard) is
+  // a guaranteed admission reject, and emitting it burns a decision epoch on
+  // an impossible dig. Measured live portal-p27.12: the pillar arm refused
+  // `dirt@7228,56,1269` `cause=flood_risk`, the step_overhead refusal still
+  // emitted `MINE:` on it, and the guard rejected the pick twice.
+  const overheadCut = (state.headroomCuts ?? []).find((cut) => samePosition(cut.pos, cell))
+  if (overheadCut !== undefined && !overheadCut.safe) return []
   const failureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const id = `MINE:${blockId('b', cell)}`
   // The named cell is identity-critical: it is the ONE cell the sensor proved

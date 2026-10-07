@@ -291,6 +291,26 @@ addCase('(ii) a safe-looking cut with an unregistered block name is not offered'
   }
 })
 
+// A named-but-unsafe overhead cell is a guaranteed guard reject: emitting its
+// MINE burns a decision epoch on an impossible dig. Measured live portal-p27.12:
+// the pillar arm refused `dirt` `cause=flood_risk`, the step_overhead refusal
+// still offered `MINE:` on the same cell, and the guard rejected the pick.
+addCase('(ii) a named overhead cell proven unsafe is not emitted as a clearance MINE', () => {
+  const state = liveState({
+    inventory: { cobblestone: 177, flint: 4, dirt: 128 },
+    headroomCuts: [
+      { pos: HEAD_CELL, name: 'dirt', safe: false, reason: 'dirt is a fluid/hazard barrier', currentFootprint: true },
+    ],
+  })
+  const gate = applyReachabilityGate([entryCandidate()], state, options)
+  return {
+    pass: !gate.candidates.some(
+      (candidate) => candidate.kind === 'MINE' && candidate.target !== null && candidate.target.x === HEAD_CELL.x && candidate.target.y === HEAD_CELL.y && candidate.target.z === HEAD_CELL.z,
+    ),
+    detail: `mines=${gate.candidates.filter((candidate) => candidate.kind === 'MINE').map((candidate) => candidate.id).join(',')}`,
+  }
+})
+
 // ---------------------------------------------------------------------------
 // (iii) A MISSING MATERIAL (not a tool): the ascend needs a placeable block the
 //       body does not hold, so the acquisition routes to the MATERIAL producer.
