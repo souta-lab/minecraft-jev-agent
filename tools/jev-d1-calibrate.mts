@@ -30,6 +30,7 @@ import {
   DEFAULT_DECISION_PROFILE_ID,
   createDirectDecisionBackend,
   profileLowConfidenceFloor,
+  readDirectDecisionDiagnostics,
   resolveProfileCredential,
 } from '../packages/jev-harness/providers/systemone-direct.ts'
 import {
@@ -283,7 +284,8 @@ export async function calibrate(args: readonly string[]): Promise<void> {
     }
     const latencyMs = Date.now() - started
     const answers = reply?.answers ?? {}
-    const metaConfidence = reply?.providerMetadata?.systemone?.confidence ?? {}
+    const diagnostics = readDirectDecisionDiagnostics(reply)
+    const metaConfidence = diagnostics.confidence
     const recordedAction = rec.response?.answers?.action?.value ?? null
     const d1Action = answers.action?.choice ?? answers.action?.value ?? null
     const actionProbs = answers.action?.probabilities ?? {}
@@ -292,8 +294,8 @@ export async function calibrate(args: readonly string[]): Promise<void> {
       corpusOrdinal: rec.corpusOrdinal,
       recordedCallId: rec.callId,
       recordedModel: rec.response?.model ?? rec.backend?.model ?? null,
-      reportedModel: reply?.providerMetadata?.systemone?.reportedModel ?? null,
-      requestId: reply?.providerMetadata?.systemone?.requestId ?? null,
+      reportedModel: diagnostics.reportedModel,
+      requestId: diagnostics.requestId,
       stateSha256: createHash('sha256').update(JSON.stringify(state)).digest('hex'),
       questionsSha256: createHash('sha256').update(JSON.stringify(questions)).digest('hex'),
       ts: rec.ts,

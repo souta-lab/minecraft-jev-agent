@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readDirectDecisionDiagnostics } from '../packages/jev-harness/providers/systemone-direct.ts'
 import { calibrationOptions, calibrationSample, calibrate } from './jev-d1-calibrate.mts'
 
 const opts = calibrationOptions(['corpus.jsonl', '--sample', '3', '--threat-sample', '2'])
@@ -14,6 +15,22 @@ for (const bad of ['-1', 'NaN', '1.5', '129']) {
 }
 assert.throws(() => calibrationOptions(['x', '--split', 'test']), /invalid split/)
 assert.throws(() => calibrationOptions(['x', '--budget-ms', '0']), /budget-ms/)
+assert.deepEqual(
+  readDirectDecisionDiagnostics({
+    providerMetadata: {
+      systemone: {
+        confidence: { action: 0.71, danger: 0.44, bogus: 'x' },
+        reportedModel: 'd1:free',
+        requestId: 'req-cal-fixture',
+      },
+    },
+  }),
+  {
+    confidence: { action: 0.71, danger: 0.44 },
+    reportedModel: 'd1:free',
+    requestId: 'req-cal-fixture',
+  },
+)
 const records = Array.from({ length: 40 }, (_, ordinal) => ({ ordinal, questions: ordinal % 3 === 0 ? { danger: {} } : { action: {} } }))
 const dev = calibrationSample(records, { ...opts, split: 'dev' })
 const holdout = calibrationSample(records, { ...opts, split: 'holdout' })

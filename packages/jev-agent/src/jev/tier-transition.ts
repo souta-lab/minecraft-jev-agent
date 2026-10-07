@@ -20,7 +20,6 @@
 // the host tracker updates its pinned identity only on the observed transition
 // event - every other provider/model identity still mismatches.
 
-import type { experimental_evaluate } from 'ai'
 import {
   DECISION_PROFILES,
   DecisionUnavailableError,
@@ -31,6 +30,7 @@ import type {
   DecisionAvailability,
   DecisionBackendProfile,
   DecisionCredential,
+  DirectDecisionBackend,
 } from '../../../jev-harness/providers/systemone-direct.ts'
 import { FatalModelError } from '../modelFailure.ts'
 import type { ModelAuthorityIdentity } from '../modelFailure.ts'
@@ -188,14 +188,14 @@ export function createTieredJevPolicy(
   // Typed-exhaustion probe: decide() wraps provider failures in FatalModelError,
   // so the typed availability is captured here where it still exists.
   let lastPaidFailure: DecisionUnavailableError | null = null
-  const probedPaidEvaluate = (async (args: Parameters<typeof experimental_evaluate>[0]) => {
+  const probedPaidEvaluate = (async (args: Parameters<DirectDecisionBackend['evaluate']>[0]) => {
     try {
       return await paidBackend.evaluate(args)
     } catch (error) {
       if (error instanceof DecisionUnavailableError) lastPaidFailure = error
       throw error
     }
-  }) as typeof experimental_evaluate
+  }) as DirectDecisionBackend['evaluate']
 
   const key = { key: '', origin: paidBackend.keyOrigin }
   const paidPolicy = new AuthorityJevPolicy(

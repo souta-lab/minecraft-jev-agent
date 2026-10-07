@@ -378,6 +378,31 @@ export interface DirectDecisionBackend {
   listModels(signal?: AbortSignal): Promise<string[]>
 }
 
+/** Repo-owned diagnostics projected from the direct provider response shape.
+ * Callers outside the harness never inspect providerMetadata themselves. */
+export interface DirectDecisionDiagnostics {
+  readonly confidence: Readonly<Record<string, number>>
+  readonly reportedModel: string | null
+  readonly requestId: string | null
+}
+
+export function readDirectDecisionDiagnostics(response: unknown): DirectDecisionDiagnostics {
+  const metadata = isRecord(response) ? response.providerMetadata : undefined
+  const systemone = isRecord(metadata) ? metadata.systemone : undefined
+  const rawConfidence = isRecord(systemone) ? systemone.confidence : undefined
+  const confidence: Record<string, number> = {}
+  if (isRecord(rawConfidence)) {
+    for (const [name, value] of Object.entries(rawConfidence)) {
+      if (typeof value === 'number' && Number.isFinite(value)) confidence[name] = value
+    }
+  }
+  return {
+    confidence,
+    reportedModel: isRecord(systemone) && typeof systemone.reportedModel === 'string' ? systemone.reportedModel : null,
+    requestId: isRecord(systemone) && typeof systemone.requestId === 'string' ? systemone.requestId : null,
+  }
+}
+
 export interface DirectDecisionBackendOptions {
   /** Per-attempt SDK timeout; the policy's own abort signal normally fires first. */
   readonly timeoutMs: number
