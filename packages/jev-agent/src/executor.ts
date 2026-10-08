@@ -4367,21 +4367,21 @@ export class Executor {
       ) {
         const direction = climbedTo > startFloorY ? 'climbed' : 'descended'
         return {
-          // A bounded vertical chunk is NOT the committed arrival: the MOVE's own
-          // contract is the destination cell, so the loop keeps the commitment and
-          // re-plans the SAME target. `verified: true` stays as the existing
-          // durable-progress evidence on the result.
+          // The bounded vertical chunk changed the body's route geometry but did
+          // not reach the committed destination. Return its body progress to
+          // policy so a fresh typed epoch grounds the next candidate.
           arrived: false,
+          replan: true,
           result: this.buildResult(
             candidate,
             epoch,
             startedAt,
             'done',
-            'arrived',
+            'vertical_chunk',
             `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded vertical chunk of the committed walk)`,
             null,
             {
-              verified: true,
+              verified: false,
               blockRemoved: dugVertical && verticalStep,
               dropObserved: false,
               itemsGained: 0,

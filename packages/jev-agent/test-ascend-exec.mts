@@ -660,14 +660,16 @@ addCase('a staircase-up step paths with an occupancy goal (GoalBlock), never adj
   }
 })
 
-addCase('an already-cleared retrieval step returns its vertical chunk before the distant approach', async () => {
+async function alreadyClearedVerticalChunk(kind: 'MOVE' | 'RETRIEVE') {
   const step = { x: 12, y: 31, z: 25 }
   const farTarget = { x: 12, y: 49, z: 29 }
   const candidate: Candidate = {
-    id: 'RETRIEVE:known:log:b12_49_29',
-    kind: 'RETRIEVE',
-    label: 'return to remembered birch_log above through the already-cleared staircase step',
-    targetName: 'birch_log',
+    id: kind === 'MOVE' ? 'MOVE:p12_49_29' : 'RETRIEVE:known:log:b12_49_29',
+    kind,
+    label: kind === 'MOVE'
+      ? 'move to the distant remembered log through the already-cleared staircase step'
+      : 'return to remembered birch_log above through the already-cleared staircase step',
+    targetName: kind === 'MOVE' ? null : 'birch_log',
     target: farTarget,
     targetEntityId: null,
     itemName: 'log',
@@ -735,10 +737,10 @@ addCase('an already-cleared retrieval step returns its vertical chunk before the
   if (result === null) executor.cancelCurrent('already-cleared retrieval step fixture timed out')
   const firstLegIndex = routeEvents.indexOf('first-leg')
   const replanIndex = routeEvents.indexOf('replan')
-  const farTargetIndex = routeEvents.indexOf('far-target')
   const firstLegMessage = firstLegMessages[0] ?? null
-  const chunkPhase = firstLegMessage?.includes('phase=retrieved') === true
-  const returnedChunk = result !== null && result.status === 'done' && result.phase === 'retrieved'
+  const expectedPhase = kind === 'MOVE' ? 'vertical_chunk' : 'retrieved'
+  const chunkPhase = firstLegMessage?.includes(`phase=${expectedPhase}`) === true
+  const returnedChunk = result !== null && result.status === 'done' && result.phase === expectedPhase
   return {
     pass:
       result !== null &&
@@ -751,11 +753,17 @@ addCase('an already-cleared retrieval step returns its vertical chunk before the
       firstLegIndex >= 0 &&
       firstLegIndex < replanIndex &&
       !farTargetAttempt,
-    detail: `returnedChunk=${returnedChunk} verified=${String(result?.verified)} progressed=${String(result?.progressed)} ` +
+    detail: `kind=${kind} returnedChunk=${returnedChunk} verified=${String(result?.verified)} progressed=${String(result?.progressed)} ` +
       `chunkPhase=${chunkPhase} replan=${replanMessages.length} stepGoalCalls=${stepGoalCalls} farTargetAttempt=${farTargetAttempt} ` +
       `order=[${routeEvents.join(',')}] goals=[${goals.join(',')}]`,
   }
-})
+}
+
+addCase('an already-cleared retrieval step returns its vertical chunk before the distant approach', async () =>
+  await alreadyClearedVerticalChunk('RETRIEVE'))
+
+addCase('a MOVE staircase chunk returns to policy before the distant target approach', async () =>
+  await alreadyClearedVerticalChunk('MOVE'))
 
 // Measured live (portal-p24.3, run-muue9c3f-7cyn gen-muui8x2m-3rb3v6 ~00:33Z):
 // pocket at y21-24, food decaying, no placeable block; every staircase face's
