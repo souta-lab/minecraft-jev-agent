@@ -29,7 +29,7 @@ import type { DecisionJevLog, DecisionRecord } from './decisionlog.ts'
 import type { ExecutionResult, Executor, FailureCode } from './executor.ts'
 import type { GatedScore } from './gating.ts'
 import type { GoalQueue } from './goalQueue.ts'
-import { decisionIdFrom } from './jev.ts'
+import { actionDeclined, decisionIdFrom } from './jev.ts'
 import type { EventLogger, JevResult, JsonlWriter, QuestionSetKind } from './jev.ts'
 import {
   buildSkillOutcomePacket,
@@ -1115,6 +1115,19 @@ export async function decide(
     host.lastDecision = replayed
     // The repointed realization id is the choice this epoch authorizes.
     host.lastDecisionId = decisionIdFrom(replayed)
+    // A cached DECLINE still needs to cross the same bounded abandonment
+    // lifecycle on each semantic decision epoch. Returning before this point
+    // left lastAbandonAdopted=false on every replay, so one deferred refusal
+    // became an endless no-actuation loop without another provider call.
+    if (actionDeclined(replayed)) {
+      const planGoal = state.goalQueue.current
+      const verdict = host.abandonVerdict(
+        replayed,
+        optionIdForGoal(planGoal),
+        planRevisionForGoal(planGoal),
+      )
+      host.lastAbandonAdopted = host.applyAbandon(replayed, verdict)
+    }
     return replayed
   }
 

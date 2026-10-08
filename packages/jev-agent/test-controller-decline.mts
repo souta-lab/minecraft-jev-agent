@@ -184,3 +184,60 @@ test('full tick records DECLINE without unoffered WAIT, guard disappearance, exe
     assert.equal(outcomes[0].actionId, null)
   } finally { f.dispose() }
 })
+
+test('cached singleton DECLINE continues the bounded abandonment lifecycle without a provider requery', async () => {
+  const f = fixture()
+  try {
+    const claims: string[] = []
+    const retired: string[] = []
+    const wakes: string[] = []
+    let providerCalls = 0
+    f.host.running = true
+    f.host.syncQueue = () => undefined
+    f.host.syncGoalToQueue = () => undefined
+    f.host.reachabilityGateOptions = () => ({ pathProbe: () => 'reachable', stationApproach: null })
+    f.host.filterMoveCandidates = (candidates: Candidate[]) => {
+      const candidate = candidates.find(c => c.kind === 'MOVE')
+      assert.ok(candidate, 'the real generator must produce a grounded MOVE')
+      return [candidate]
+    }
+    f.host.queue.applyPlan([{
+      kind: 'collect', description: 'collect 1 x log', targetItem: 'log', requiredCount: 1,
+      optionInstanceId: 'collect:log', optionTemplateId: 'collect:log',
+      semanticOptionInstanceId: 'collect:log', semanticOptionTemplateId: 'collect:log',
+      semanticOptionIntent: 'collect log',
+    }], 'llm', 'replace')
+    f.host.recentOutcomes = [{
+      execution: 'control', control: 'wait', progress: 'none', progressKinds: [], failure: null,
+    }]
+    f.host.markOptionAbandoned = (id: string) => retired.push(id)
+    f.host.summonLlm = (reason: string) => { wakes.push(reason); return null }
+    f.host.jev = {
+      kind: 'typesafe', model: 'fixture',
+      decide: async () => {
+        providerCalls++
+        return vote('DECLINE')
+      },
+    }
+    ;(f.controller.agent as unknown as Record<string, any>).claim = (candidate: Candidate) => {
+      claims.push(candidate.id)
+      throw Error('DECLINE must never actuate')
+    }
+
+    await f.host.tick('heartbeat', {})
+    await f.host.tick('heartbeat', {})
+    await f.host.tick('heartbeat', {})
+
+    assert.equal(providerCalls, 1,
+      `semantic replay must not spend another provider call; queue=${f.host.queue.current?.id ?? 'none'} wakes=${JSON.stringify(wakes)} outcomes=${f.host.jevCalls}`)
+    assert.deepEqual(claims, [], 'DECLINE must never claim an executor capability')
+    assert.equal(retired.length, 1,
+      `the bounded deferred refusal must eventually retire the current option; queue=${f.host.queue.current?.id ?? 'none'} deferrals=${f.host.betaAbandonDeferral.count()} lastAdopted=${f.host.lastAbandonAdopted} wakes=${JSON.stringify(wakes)}`)
+    assert.deepEqual(wakes, ['no_progress'], 'the existing lifecycle hands WHAT repair to System2')
+    const outcomes = readFileSync(join(f.logDir, 'jev-calls.jsonl'), 'utf8').trim().split('\n')
+      .filter(Boolean).map(l => JSON.parse(l)).filter(r => r.record === 'jev-outcome')
+    assert.ok(outcomes.length >= 3, 'each replay remains non-actuating outcome evidence')
+    assert.ok(outcomes.every((row: { executed: boolean; verified: boolean; actionId: string | null }) =>
+      row.executed === false && row.verified === false && row.actionId === null))
+  } finally { f.dispose() }
+})
