@@ -271,6 +271,10 @@ export function betaTerminationBoundary(host: AbandonLifecycleHost, decision: Je
   const outcome = host.recentOutcomes.at(-1) ?? null
   const evidence = host.signals?.strategicNonProgress ?? null
   const semanticExhausted = evidence !== null && evidence.exhausted
+  // Keep the lifecycle request identical to the verdict path: a typed
+  // singleton DECLINE is itself a beta-form refusal even when the separate
+  // abandon_option probability is below its calibrated threshold.
+  const requested = abandonRequested(decision) || actionDeclined(decision)
   if (semanticExhausted) {
     host.logger.warn(
       'agent',
@@ -292,13 +296,13 @@ export function betaTerminationBoundary(host: AbandonLifecycleHost, decision: Je
   }
   const boundary = evaluateBetaTerminationBoundary({
     optionId,
-    requested: abandonRequested(decision),
+    requested,
     decisionActionId: decisionIdFrom(decision),
     latestOutcome: outcome,
     semanticExhausted,
     semanticInvalid: false,
   })
-  if (!abandonRequested(decision) || boundary.adopt) {
+  if (!requested || boundary.adopt) {
     // A vote that is honored (or not requested) ends the deferred streak.
     host.betaAbandonDeferral.reset()
     return boundary

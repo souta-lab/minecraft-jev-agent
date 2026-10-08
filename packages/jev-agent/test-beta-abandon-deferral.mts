@@ -36,6 +36,7 @@ import {
 } from './src/replanThrottle.ts'
 import { evaluateBetaTerminationBoundary } from './src/system2/escalation.ts'
 import { JevController, MIRRORED_MARKERS } from './src/controller.ts'
+import { actionDeclined, decisionIdFrom } from './src/jev.ts'
 import type { JevResult } from './src/jev.ts'
 
 interface Case {
@@ -285,6 +286,47 @@ addCase('(b) the same cached search outcome cannot defer DECLINE forever', () =>
   }
 })
 
+addCase('low-probability singleton DECLINE with stale search progress hands off within nine epochs', () => {
+  const harness = makeHarness(GOAL, BETA_ABANDON_DEFER_CYCLES_DEFAULT)
+  const refusal = declineDecision(0.060086646807761206)
+  const searchOutcome = {
+    actionId: 'MINE:ceiling',
+    status: 'success',
+    failure: null,
+    verified: true,
+    detail: 'cleared one route block',
+    execution: 'success',
+    verification: 'verified',
+    progress: 'search',
+    progressKinds: ['search'],
+    control: 'none',
+  }
+  const votes = Array.from({ length: 9 }, () => harness.call(refusal, searchOutcome))
+  const released = votes.findIndex((vote) => vote.adopt && vote.wake && vote.reason === 'semantic_abandon')
+  const releaseCount = votes.filter((vote) => vote.adopt || vote.wake).length
+  const deferredCounts = harness.lines
+    .filter((line) => line.startsWith(BETA_ABANDON_DEFERRED_MARKER))
+    .map((line) => line.split(' ')[1])
+  const expectedBeforeRelease = [
+    `count=0/${BETA_ABANDON_DEFER_CYCLES_DEFAULT}`,
+    ...Array.from({ length: BETA_ABANDON_DEFER_CYCLES_DEFAULT - 1 }, (_, index) =>
+      `count=${index + 1}/${BETA_ABANDON_DEFER_CYCLES_DEFAULT}`),
+  ]
+  return {
+    pass:
+      refusal.answers.action?.value === 'DECLINE' &&
+      refusal.answers.abandon_option?.probability === 0.060086646807761206 &&
+      actionDeclined(refusal) &&
+      decisionIdFrom(refusal) === null &&
+      released >= 0 && released < 9 &&
+      releaseCount === 1 &&
+      votes.every((vote, index) => index === released || (!vote.adopt && !vote.wake)) &&
+      countOf(harness.lines, BETA_ABANDON_RELEASED_MARKER) === 1 &&
+      deferredCounts.slice(0, released).join(',') === expectedBeforeRelease.join(','),
+    detail: `p=${refusal.answers.abandon_option?.probability} decline=${actionDeclined(refusal)} actuationId=${decisionIdFrom(refusal)} releaseEpoch=${released < 0 ? 'none' : released + 1}/9 deferred=[${deferredCounts.join(',')}]`,
+  }
+})
+
 addCase('(b) a control outcome that still made progress resets the streak', () => {
   const harness = makeHarness(GOAL, 3)
   harness.call(decision('MINE:oak_log', 0.52), noProgressOutcome)
@@ -384,7 +426,7 @@ function declineDecision(beta: number): JevResult {
       abandon_option: {
         name: 'abandon_option',
         type: 'boolean',
-        value: 1,
+        value: beta,
         probability: beta,
         confidence: null,
         probabilities: null,
