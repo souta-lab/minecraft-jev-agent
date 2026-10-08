@@ -626,6 +626,8 @@ export interface WalkLegExecution {
   arrived: boolean
   /** the settled result of this leg (used verbatim when `arrived`) */
   result: ExecutionResult
+  /** bounded target-directed vertical progress that requires policy re-grounding */
+  replan?: boolean
 }
 
 export class ActionCancelled extends Error {
@@ -3999,6 +4001,7 @@ export class Executor {
       const bound = this.boundWalkLeg(signal, deadlineAt)
       const before = remaining
       let arrived = false
+      let replan = false
       let settled: ExecutionResult | null = null
       let thrown: unknown = null
       let legFailure: WalkLegFailure | null = null
@@ -4009,6 +4012,7 @@ export class Executor {
         // SAME committed target tightens arrival to the committed cell.
         const leg = await runLeg(bound.signal, legs > 0, Math.max(1, deadlineAt - Date.now()))
         arrived = leg.arrived
+        replan = leg.replan === true
         settled = leg.result
         phase = leg.result.phase
       } catch (error) {
@@ -4099,6 +4103,19 @@ export class Executor {
             progressed: settled?.progressed ?? false,
           },
         )
+      }
+      // A bounded vertical chunk may reduce the target gap while still leaving
+      // the committed distant target unreached. The next movement must be
+      // grounded from the new body position through the Typed Decision Plane;
+      // continuing this same walk leg would path toward stale geometry.
+      if (replan) {
+        if (settled === null) throw new Error(`Walk leg ${legs} requested replan without a settled result`)
+        this.logger.info(
+          'executor',
+          `SKILL_REPLAN_BOUNDARY skill=${skill} reason=target_directed_vertical_chunk actionId=${candidate.id}`,
+          { actionId: candidate.id, commitmentId: commitment.commitmentId, legs, remaining: round2(remaining) },
+        )
+        return settled
       }
       // A fail-closed envelope refusal is a statement about the COMMITMENT, not a
       // transient leg failure: the commitment cannot perform a step it needs, so
@@ -5184,6 +5201,7 @@ export class Executor {
       }
       return {
         arrived: false,
+        replan: true,
         result: this.buildResult(
           candidate,
           epoch,
@@ -5193,7 +5211,9 @@ export class Executor {
           `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded vertical chunk of the committed retrieval)`,
           null,
           {
-            verified: outcome.verified,
+            // This chunk changes only the body's approach geometry; it does
+            // not satisfy the remembered-resource postcondition.
+            verified: false,
             blockRemoved: dugVertical && verticalStep,
             dropObserved: false,
             itemsGained: 0,

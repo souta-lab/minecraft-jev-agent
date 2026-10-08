@@ -691,6 +691,7 @@ addCase('an already-cleared retrieval step returns its vertical chunk before the
   let farTargetAttempt = false
   const routeEvents: string[] = []
   const firstLegMessages: string[] = []
+  const replanMessages: string[] = []
   const { bot } = makeStructuralBot(goals, {
     start: { x: 12.5, y: 30, z: 26.5 },
     blockAt: () => ({ name: 'air', boundingBox: 'empty' }),
@@ -714,6 +715,10 @@ addCase('an already-cleared retrieval step returns its vertical chunk before the
       firstLegMessages.push(line.message)
       routeEvents.push('first-leg')
     }
+    if (line.message.startsWith('SKILL_REPLAN_BOUNDARY')) {
+      replanMessages.push(line.message)
+      routeEvents.push('replan')
+    }
   }), {
     ...defaultExecutorOptions,
     actuation: 'pathfinder',
@@ -722,16 +727,33 @@ addCase('an already-cleared retrieval step returns its vertical chunk before the
     packetStepMs: 0,
     maxStepsPerWaypoint: 1,
   })
-  fixtureClaim(executor, candidate)
-  const returnedChunk = await waitFor(() => firstLegMessages.length > 0, 1000)
-  executor.cancelCurrent('already-cleared retrieval step fixture complete')
+  const claim = fixtureClaim(executor, candidate)
+  const result = await Promise.race([
+    claim.completion,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+  ])
+  if (result === null) executor.cancelCurrent('already-cleared retrieval step fixture timed out')
   const firstLegIndex = routeEvents.indexOf('first-leg')
+  const replanIndex = routeEvents.indexOf('replan')
   const farTargetIndex = routeEvents.indexOf('far-target')
   const firstLegMessage = firstLegMessages[0] ?? null
   const chunkPhase = firstLegMessage?.includes('phase=retrieved') === true
+  const returnedChunk = result !== null && result.status === 'done' && result.phase === 'retrieved'
   return {
-    pass: returnedChunk && stepGoalCalls >= 1 && chunkPhase && (!farTargetAttempt || firstLegIndex < farTargetIndex),
-    detail: `returnedChunk=${returnedChunk} chunkPhase=${chunkPhase} stepGoalCalls=${stepGoalCalls} farTargetAttempt=${farTargetAttempt} order=[${routeEvents.join(',')}] goals=[${goals.join(',')}]`,
+    pass:
+      result !== null &&
+      returnedChunk &&
+      result.verified === false &&
+      result.progressed === true &&
+      stepGoalCalls === 1 &&
+      chunkPhase &&
+      replanMessages.length === 1 &&
+      firstLegIndex >= 0 &&
+      firstLegIndex < replanIndex &&
+      !farTargetAttempt,
+    detail: `returnedChunk=${returnedChunk} verified=${String(result?.verified)} progressed=${String(result?.progressed)} ` +
+      `chunkPhase=${chunkPhase} replan=${replanMessages.length} stepGoalCalls=${stepGoalCalls} farTargetAttempt=${farTargetAttempt} ` +
+      `order=[${routeEvents.join(',')}] goals=[${goals.join(',')}]`,
   }
 })
 
