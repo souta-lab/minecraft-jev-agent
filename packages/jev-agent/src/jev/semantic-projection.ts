@@ -91,8 +91,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 8
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v8'
+export const JEV_PROJECTION_VERSION = 9
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v9'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -623,6 +623,25 @@ export function semanticCandidateKey(candidate: Candidate, ctx: SemanticIdentity
   ].join('|')
 }
 
+/**
+ * A route-anchored clearance MINE targets whichever safe block realizes the
+ * already-selected route. Its block name is mechanical realization detail; the
+ * approach leg + destination in the semantic identity carry the decision
+ * meaning. Keep ordinary/resource MINE target names decision-relevant.
+ */
+function isRouteClearanceMine(candidate: Candidate): boolean {
+  return (
+    candidate.kind === 'MINE' &&
+    candidate.meta.clearance === true &&
+    metaString(candidate, 'approachTarget') !== null &&
+    metaString(candidate, 'approachLeg')?.endsWith('_clearance') === true
+  )
+}
+
+function semanticViewTargetName(candidate: Candidate): string | null {
+  return isRouteClearanceMine(candidate) ? null : candidate.targetName
+}
+
 export interface SemanticCandidateView {
   /** §4 stable identity (what the projection hash and the log key on) */
   identity: string
@@ -702,7 +721,7 @@ export function dedupeSemanticCandidates(
       id: candidate.id,
       kind: candidate.kind,
       label: candidate.label,
-      targetName: candidate.targetName,
+      targetName: semanticViewTargetName(candidate),
       inReach: candidate.inReach,
       failureCount: count,
       failureBand: failureBandOf(count),
@@ -2109,10 +2128,36 @@ function candidateDecisionKey(views: readonly SemanticCandidateView[]): unknown[
  * safety; sensed block NAMES are exempt - terrain scroll while walking - since
  * a decision-relevant arrival already surfaces as a candidate or a fact.
  */
-function resourceEvidenceKey(projection: JevSemanticProjection): unknown {
+function isRouteClearanceView(view: SemanticCandidateView): boolean {
+  if (view.kind !== 'MINE') return false
+  const marker = '|skill=MINE|target=position:approach:'
+  const start = view.identity.indexOf(marker)
+  if (start < 0) return false
+  const legStart = start + marker.length
+  const targetStart = view.identity.indexOf('->', legStart)
+  return targetStart > legStart && view.identity.slice(legStart, targetStart).endsWith('_clearance')
+}
+
+function sharesRouteClearance(answered: JevSemanticProjection, current: JevSemanticProjection): boolean {
+  const prior = new Set(answered.candidates.filter(isRouteClearanceView).map((view) => view.identity))
+  return current.candidates.some((view) => isRouteClearanceView(view) && prior.has(view.identity))
+}
+
+function resourceEvidenceKey(
+  projection: JevSemanticProjection,
+  routeClearanceContinues = false,
+): unknown {
   return {
     facts: projection.facts.map((fact) => `${fact.kind}:${fact.key}`).sort(),
-    events: [...new Set(projection.events)].sort(),
+    // A verified `dug` event and the prior answer's `low_confidence` marker are
+    // realization/answer provenance while the same anchored clearance route
+    // remains offered, not new evidence about WHICH route to take. Newly
+    // grounded candidates, sensed facts, and inventory types still create a
+    // boundary below; a changed route identity does too. Keep every other event
+    // kind decision-relevant.
+    events: [...new Set(projection.events)]
+      .filter((event) => !(routeClearanceContinues && (event === 'dug' || event === 'low_confidence')))
+      .sort(),
     inventoryTypes: Object.keys(projection.inventory).sort(),
     inventoryTruncated: projection.inventoryTruncated,
   }
@@ -2153,7 +2198,13 @@ export function classifySemanticBoundary(input: SemanticBoundaryInput): Semantic
   if (!boundaryEqual(progressBoundaryKey(answered.progress), progressBoundaryKey(current.progress))) {
     return { requery: true, reason: 'progress_boundary' }
   }
-  if (!boundaryEqual(resourceEvidenceKey(answered), resourceEvidenceKey(current))) {
+  const routeClearanceContinues = sharesRouteClearance(answered, current)
+  if (
+    !boundaryEqual(
+      resourceEvidenceKey(answered, routeClearanceContinues),
+      resourceEvidenceKey(current, routeClearanceContinues),
+    )
+  ) {
     return { requery: true, reason: 'resource_evidence_changed' }
   }
   // Defensive: any model-visible key not handled above is compared verbatim.
