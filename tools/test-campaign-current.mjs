@@ -54,6 +54,32 @@ assert.equal(current.derivedOnly, true)
 
 const matched = { ...registry, activeGenerationId: 'gen-new', generationSourceSha: 'live-sha', generationBuildHash: 'live-hash' }
 assert.equal(buildCampaignCurrent({ ...input, registry: matched }).lifecycle.evidence, 'LIVE')
+
+const frozenRegistry = { ...registry, lifecycle: 'frozen', activeGenerationId: null }
+const frozenReport = {
+  ...report, frozen: true, generationId: null, status: null,
+  currentInventoryObservation: {
+    sourceSha: 'host-sha', generationId: null, observedAt: at,
+    worldKey: report.worldKey, counts: { iron_ingot: 1 },
+  },
+}
+const frozenCurrent = buildCampaignCurrent({ ...input, registry: frozenRegistry, report: frozenReport })
+assert.equal(frozenCurrent.lifecycle.evidence, 'FROZEN', 'native frozen report is current even with no active generation')
+assert.equal(frozenCurrent.lifecycle.frozen, true)
+assert.equal(frozenCurrent.lifecycle.connected, true)
+assert.equal(frozenCurrent.lifecycle.recordedLifecycle, 'frozen', 'registry lifecycle is distinct from registry status')
+assert.equal(frozenCurrent.source.generationId, null, 'disposed generation is never projected as active')
+assert.equal(frozenCurrent.source.generationSourceSha, null)
+assert.equal(frozenCurrent.source.hostBootSha, 'host-sha', 'frozen report preserves the native HOST boot source')
+assert.deepEqual(frozenCurrent.liveTruth.inventory, { iron_ingot: 1 })
+const frozenDrift = buildCampaignCurrent({
+  ...input,
+  registry: { ...frozenRegistry, activeGenerationId: 'gen-disposed', hostBootSha: 'wrong-boot', lifecycle: 'active' },
+  report: frozenReport,
+})
+assert.equal(frozenDrift.lifecycle.evidence, 'UNKNOWN_PROVENANCE_DRIFT')
+assert.equal(frozenDrift.lifecycle.frozen, true, 'native quiesced truth remains visible while registry drift is flagged')
+assert.deepEqual(frozenDrift.lifecycle.drift, ['activeGenerationId', 'hostBootSha', 'lifecycle'])
 for (const variant of [
   { registry: { ...registry, status: 'quiesced' } },
   { processes: { resident: { alive: false, identityMatches: false } } },

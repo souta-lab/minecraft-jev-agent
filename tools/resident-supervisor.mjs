@@ -65,6 +65,7 @@ import {
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { updateActiveRunMinor } from './capability-run.mjs'
+import { readResidentReport } from './current-status.mjs'
 
 export const SCHEMA_VERSION = 1
 
@@ -317,7 +318,7 @@ Options:
                         advanced/testing only: the default is the real resident)
   --artifact-dir PATH   where run-scoped artifacts go (default <driver-dir>/data/supervisor)
   --log PATH            also append supervisor lifecycle lines to PATH
-  --registry PATH       active-run registry to sync after child GENERATION_READY
+  --registry PATH       active-run registry to sync after native-confirmed GENERATION_READY
                         (default <root>/runs/capability-campaign/active-run.json)
   --no-registry-sync    disable campaign registry ownership/PID sync
   --no-preflight        skip the "resident already running" guard (UNSAFE; tests only)
@@ -545,10 +546,10 @@ export function admitRegistryShaSuccession({
 }
 
 /**
- * Transfer active-run lifecycle ownership to this supervisor/resident pair after
- * the new child proves its generation identity. This is intentionally keyed by
+ * Transfer active-run lifecycle ownership only after a native report confirms
+ * that the candidate generation is active. This is intentionally keyed by
  * runtimeDir + sourceSha so a stale or unrelated supervisor cannot rewrite the
- * active campaign record.
+ * active campaign record, and a frozen/disposed generation cannot be claimed.
  */
 export function syncActiveRunRegistryOnReady({
   registryPath,
@@ -556,6 +557,7 @@ export function syncActiveRunRegistryOnReady({
   childPid,
   supervisorPid = process.pid,
   ready,
+  residentReport = null,
   updater = updateActiveRunMinor,
   successionDeps = {},
 } = {}) {
@@ -568,6 +570,51 @@ export function syncActiveRunRegistryOnReady({
   try { current = JSON.parse(readFileSync(registryPath, 'utf8')) } catch { return { status: 'skipped', reason: 'registry-unreadable' } }
   if (current?.record !== 'capability-active-run' || current.status !== 'active') return { status: 'skipped', reason: 'registry-not-active' }
   if (!sameResolvedPath(current.runtimeDir, driverDir)) return { status: 'skipped', reason: 'runtime-dir-mismatch' }
+
+  // GENERATION_READY is emitted before the host's frozen-state gate can dispose
+  // a staged generation. Treat the resident's native read-only report as the
+  // commit boundary: a disposed/deferred generation must never be recorded as
+  // active. The frozen report also carries the original HOST boot SHA, which a
+  // same-process generation reload must preserve.
+  const live = residentReport?.data ?? residentReport
+  if (live === null || typeof live !== 'object') return { status: 'skipped', reason: 'resident-report-unavailable' }
+  if (live.runId !== ready.runId) return { status: 'skipped', reason: 'resident-report-run-mismatch' }
+  if (live.hostLock?.pid !== childPid) return { status: 'skipped', reason: 'resident-report-pid-mismatch' }
+  const observedAt = Date.parse(live.currentInventoryObservation?.observedAt ?? '')
+  if (!Number.isFinite(observedAt) || Date.now() - observedAt < -2000 || Date.now() - observedAt > 15_000) {
+    return { status: 'skipped', reason: 'resident-report-stale' }
+  }
+  if (current.port && live.worldKey?.serverId !== `127.0.0.1:${current.port}`) {
+    return { status: 'skipped', reason: 'resident-report-server-mismatch' }
+  }
+  const bootSha = live.currentInventoryObservation?.sourceSha
+  const launcherOwned = current.supervisorPid === supervisorPid
+  const initialBind = launcherOwned && (current.residentPid ?? null) === null
+  const sameResident = current.residentPid === childPid && current.internalRunId === ready.runId
+  if (live.frozen === true && live.connected === true && live.generationId == null) {
+    const fields = {
+      runnerPid: launcherOwned ? current.runnerPid : supervisorPid,
+      supervisorPid,
+      residentPid: childPid,
+      internalRunId: ready.runId,
+      activeGenerationId: null,
+      lifecycle: 'frozen',
+    }
+    if (!initialBind) fields.boundary = sameResident ? 'generation-reload' : 'resident-restart'
+    if (typeof bootSha === 'string' && /^[0-9a-f]{40}$/u.test(bootSha)) fields.hostBootSha = bootSha
+    const next = updater(fields, registryPath)
+    const actualResidentRestart = !initialBind && !sameResident
+    return {
+      status: 'updated', reason: 'native-report-frozen', residentRestart: actualResidentRestart,
+      runId: next.runId, activeMinor: next.activeMinor, runnerPid: next.runnerPid,
+      residentPid: next.residentPid, internalRunId: next.internalRunId,
+      generationId: null, sourceSha: next.generationSourceSha,
+    }
+  }
+  if (live.frozen === true || live.connected !== true || live.generationId !== ready.generationId ||
+      live.status?.running !== true || live.status?.sourceSha !== ready.sourceSha) {
+    return { status: 'skipped', reason: 'ready-generation-not-live' }
+  }
   let shaSuccession = false
   if (typeof current.generationSourceSha === 'string' && current.generationSourceSha !== ready.sourceSha) {
     const succession = admitRegistryShaSuccession({ current, ready, driverDir, childPid, supervisorPid, ...successionDeps })
@@ -578,8 +625,6 @@ export function syncActiveRunRegistryOnReady({
   // A launcher-owned run (tools/capability-run.mjs) registers this supervisor at
   // launch: the launcher stays the runner, and the first child's ready line is
   // the major's initial bind, not a resident-restart boundary.
-  const launcherOwned = current.supervisorPid === supervisorPid
-  const initialBind = launcherOwned && (current.residentPid ?? null) === null
   const residentRestart = !initialBind && (current.residentPid !== childPid || current.internalRunId !== ready.runId)
   const fields = {
     runnerPid: launcherOwned ? current.runnerPid : supervisorPid,
@@ -587,6 +632,7 @@ export function syncActiveRunRegistryOnReady({
     residentPid: childPid,
     internalRunId: ready.runId,
     activeGenerationId: ready.generationId,
+    lifecycle: 'active',
   }
   if (shaSuccession) {
     fields.sha = ready.sourceSha
@@ -594,9 +640,13 @@ export function syncActiveRunRegistryOnReady({
     fields.generationBuildHash = ready.buildHash ?? null
     fields.treeDirty = false
   }
-  if (residentRestart || shaSuccession) {
+  if (residentRestart) {
     fields.boundary = 'resident-restart'
-    fields.hostBootSha = ready.sourceSha
+    fields.hostBootSha = bootSha ?? ready.sourceSha
+  } else if (!initialBind) {
+    // A clean source advance inside the existing HOST is a generation reload;
+    // HOST boot provenance remains the source that created this resident.
+    fields.boundary = 'generation-reload'
   }
   const next = updater(fields, registryPath)
   return {
@@ -831,33 +881,40 @@ export async function supervise(options, deps = {}) {
       // Preserve the resident's own logs on the supervisor's streams while keeping
       // a bounded ring of lines for marker extraction.
       const captured = []
+      const pendingRegistrySyncs = []
       const onLine = (line) => {
         captured.push(line)
         if (captured.length > MAX_CAPTURED_LINES) captured.shift()
-        // GENERATION_READY is a live ownership boundary, not a one-shot child
-        // bootstrap marker. Respawn/recovery generations under the same resident
-        // must advance activeGenerationId too, or active-run provenance drifts
-        // immediately after the first death.
+        // GENERATION_READY is a candidate ownership boundary. Confirm it against
+        // the resident's read-only report before syncing, because frozen hosts
+        // may dispose a staged generation immediately after this marker.
         if (options.registrySync) {
           const ready = parseGenerationReadyLine(line)
           if (ready !== null) {
-            try {
-              const synced = syncActiveRunRegistryOnReady({
-                registryPath: options.registryPath,
-                driverDir: options.driverDir,
-                childPid: child.pid,
-                supervisorPid: process.pid,
-                ready,
-              })
-              emit({ type: 'registry_sync', at: new Date().toISOString(), ...synced })
-            } catch (error) {
-              emit({
-                type: 'registry_sync',
-                at: new Date().toISOString(),
-                status: 'error',
-                reason: error instanceof Error ? error.message : String(error),
-              })
-            }
+            pendingRegistrySyncs.push((async () => {
+              try {
+                const residentReport = await readResidentReport(
+                  path.join(options.driverDir, 'data', 'resident', 'control.sock'),
+                  2000,
+                )
+                const synced = syncActiveRunRegistryOnReady({
+                  registryPath: options.registryPath,
+                  driverDir: options.driverDir,
+                  childPid: child.pid,
+                  supervisorPid: process.pid,
+                  ready,
+                  residentReport,
+                })
+                emit({ type: 'registry_sync', at: new Date().toISOString(), ...synced })
+              } catch (error) {
+                emit({
+                  type: 'registry_sync',
+                  at: new Date().toISOString(),
+                  status: 'error',
+                  reason: error instanceof Error ? error.message : String(error),
+                })
+              }
+            })())
           }
         }
       }
@@ -868,6 +925,7 @@ export async function supervise(options, deps = {}) {
 
       const code = await child.exited
       await Promise.all(pumps)
+      await Promise.all(pendingRegistrySyncs)
       currentChild = null
       const uptimeMs = Math.max(0, now() - startedAt)
       const signalCode = child.signalCode ?? null

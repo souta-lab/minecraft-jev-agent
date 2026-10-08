@@ -34,6 +34,18 @@ const {
 const tmp = mkdtempSync(join(tmpdir(), 'resident-supervisor-'))
 let checks = 0
 
+function nativeReport({ runId, generationId, sourceSha, buildHash = 'abc', hostBootSha = sourceSha, frozen = false, residentPid = 20, port = 26614 }) {
+  return {
+    data: {
+      runId, generationId: frozen ? null : generationId, frozen, connected: true,
+      hostLock: { pid: residentPid },
+      worldKey: { serverId: `127.0.0.1:${port}`, dimension: 'minecraft:overworld', worldEpoch: 1 },
+      currentInventoryObservation: { sourceSha: hostBootSha, observedAt: new Date().toISOString() },
+      status: frozen ? null : { running: true, sourceSha, buildHash },
+    },
+  }
+}
+
 // The fake resident: counts its own invocations, then fails or succeeds.
 const FAKE_CHILD = `import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 const counterPath = process.env.FAKE_RESIDENT_COUNTER
@@ -216,6 +228,7 @@ try {
   assert.deepEqual(ready, { runId: 'run-new', generationId: 'gen-new', sourceSha, buildHash: 'abc', treeDirty: null })
   const synced = syncActiveRunRegistryOnReady({
     registryPath, driverDir: driverRegistry, childPid: 222, supervisorPid: 111, ready,
+    residentReport: nativeReport({ runId: 'run-new', generationId: 'gen-new', sourceSha, buildHash: 'abc', residentPid: 222 }),
   })
   assert.equal(synced.status, 'updated')
   assert.equal(synced.residentRestart, true)
@@ -230,9 +243,61 @@ try {
   const mismatch = syncActiveRunRegistryOnReady({
     registryPath, driverDir: driverRegistry, childPid: 333, supervisorPid: 111,
     ready: { runId: 'run-wrong', generationId: 'gen-wrong', sourceSha: 'b'.repeat(40), treeDirty: true },
+    residentReport: nativeReport({ runId: 'run-wrong', generationId: 'gen-wrong', sourceSha: 'b'.repeat(40), buildHash: 'abc', residentPid: 333 }),
   })
   assert.deepEqual(mismatch, { status: 'skipped', reason: 'tree-dirty-or-missing' })
   assert.equal(JSON.parse(readFileSync(registryPath, 'utf8')).residentPid, 222, 'mismatched generation must not rewrite registry')
+  checks++
+
+  // A GENERATION_READY line followed by a frozen native report is a disposed
+  // staging generation, not an active generation. Preserve the original HOST
+  // boot SHA and record the actual frozen/no-generation state.
+  const frozenRoot = makeRoot('root-frozen-ready')
+  const frozenDriver = join(frozenRoot, 'packages/buddy-driver')
+  const frozenRegistryDir = join(frozenRoot, 'runs', 'capability-campaign')
+  mkdirSync(frozenRegistryDir, { recursive: true })
+  const frozenRegistryPath = join(frozenRegistryDir, 'active-run.json')
+  const bootSha = 'd'.repeat(40)
+  const stagedSha = 'e'.repeat(40)
+  writeActiveRunRegistry({
+    record: 'capability-active-run', schemaVersion: 1, status: 'active',
+    runId: 'portal-frozen', runDir: join(frozenRegistryDir, 'runs/portal-frozen'),
+    claimToken: 'portal-frozen#old', activeMinor: 'portal-frozen.2', segmentId: 'portal-frozen.2',
+    runtimeDir: frozenDriver, runnerPid: 10, residentPid: 20, supervisorPid: 30,
+    internalRunId: 'run-frozen', activeGenerationId: 'gen-disposed',
+    sha: stagedSha, generationSourceSha: stagedSha, hostBootSha: 'f'.repeat(40),
+    lifecycle: 'frozen', boundary: 'resident-restart',
+  }, frozenRegistryPath)
+  const frozenSync = syncActiveRunRegistryOnReady({
+    registryPath: frozenRegistryPath, driverDir: frozenDriver, childPid: 20, supervisorPid: 30,
+    ready: { runId: 'run-frozen', generationId: 'gen-staged', sourceSha: stagedSha, buildHash: 'bh' },
+    residentReport: nativeReport({ runId: 'run-frozen', generationId: null, sourceSha: stagedSha, hostBootSha: bootSha, frozen: true, residentPid: 20 }),
+  })
+  assert.equal(frozenSync.status, 'updated')
+  assert.equal(frozenSync.reason, 'native-report-frozen')
+  const frozenStored = JSON.parse(readFileSync(frozenRegistryPath, 'utf8'))
+  assert.equal(frozenStored.activeGenerationId, null, 'a disposed staged generation is not active')
+  assert.equal(frozenStored.lifecycle, 'frozen')
+  assert.equal(frozenStored.boundary, 'generation-reload', 'same PID and internal run means no resident restart')
+  assert.equal(frozenStored.hostBootSha, bootSha, 'native report preserves the original HOST boot SHA')
+  assert.equal(frozenStored.residentPid, 20)
+  assert.equal(frozenStored.internalRunId, 'run-frozen')
+  checks++
+
+  // A live generation advance inside the same resident records a generation
+  // reload and leaves HOST boot provenance untouched.
+  const reloadReady = { runId: 'run-frozen', generationId: 'gen-live', sourceSha: stagedSha, buildHash: 'bh2' }
+  const reloaded = syncActiveRunRegistryOnReady({
+    registryPath: frozenRegistryPath, driverDir: frozenDriver, childPid: 20, supervisorPid: 30,
+    ready: reloadReady,
+    residentReport: nativeReport({ runId: 'run-frozen', generationId: 'gen-live', sourceSha: stagedSha, buildHash: 'bh2', hostBootSha: bootSha, residentPid: 20 }),
+  })
+  assert.equal(reloaded.status, 'updated')
+  const reloadedStored = JSON.parse(readFileSync(frozenRegistryPath, 'utf8'))
+  assert.equal(reloadedStored.activeGenerationId, 'gen-live')
+  assert.equal(reloadedStored.boundary, 'generation-reload')
+  assert.equal(reloadedStored.hostBootSha, bootSha)
+  assert.equal(reloadedStored.lifecycle, 'active', 'native live generation report clears frozen lifecycle')
   checks++
 
   // ---- sha succession gate: admitted only on dead owner + clean ready + HEAD + clean tree
@@ -256,6 +321,7 @@ try {
   const admit = syncActiveRunRegistryOnReady({
     registryPath, driverDir: driverRegistry, childPid: 777, supervisorPid: 555,
     ready: cleanReady, successionDeps: depsFor(),
+    residentReport: nativeReport({ runId: 'run-s2', generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', residentPid: 777 }),
   })
   assert.equal(admit.status, 'updated', `succession must admit dead owner + clean ready + HEAD match: ${JSON.stringify(admit)}`)
   const admitted = JSON.parse(readFileSync(registryPath, 'utf8'))
@@ -292,6 +358,7 @@ try {
     const out = syncActiveRunRegistryOnReady({
       registryPath, driverDir: driverRegistry, childPid: 777, supervisorPid: 555,
       ready: readyOver ?? cleanReady, successionDeps: depsFor(depsOver),
+      residentReport: nativeReport({ runId: 'run-s2', generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', residentPid: 777 }),
     })
     assert.deepEqual(out, { status: 'skipped', reason }, `${label}`)
   }
@@ -309,6 +376,7 @@ try {
   const bind = syncActiveRunRegistryOnReady({
     registryPath, driverDir: driverRegistry, childPid: 902, supervisorPid: 901,
     ready: { runId: 'run-first', generationId: 'gen-first', sourceSha },
+    residentReport: nativeReport({ runId: 'run-first', generationId: 'gen-first', sourceSha, residentPid: 902 }),
   })
   assert.equal(bind.status, 'updated')
   assert.equal(bind.residentRestart, false, 'first child of a launcher-owned supervisor is not a restart')
@@ -321,6 +389,7 @@ try {
   const relaunch = syncActiveRunRegistryOnReady({
     registryPath, driverDir: driverRegistry, childPid: 903, supervisorPid: 901,
     ready: { runId: 'run-second', generationId: 'gen-second', sourceSha },
+    residentReport: nativeReport({ runId: 'run-second', generationId: 'gen-second', sourceSha, residentPid: 903 }),
   })
   assert.equal(relaunch.residentRestart, true, 'outage relaunch under the same supervisor is a resident restart')
   const restarted = JSON.parse(readFileSync(registryPath, 'utf8'))
@@ -358,12 +427,10 @@ try {
   const multiArtifact = readArtifact(artMulti)
   const syncs = multiArtifact.records.filter((record) => record.type === 'registry_sync')
   assert.equal(syncs.length, 2, 'both READY lines from one resident must sync ownership')
-  assert.equal(syncs[0].generationId, 'gen-one')
-  assert.equal(syncs[1].generationId, 'gen-two')
-  assert.equal(syncs[1].residentRestart, false, 'same child/run generation advance is not a resident restart')
+  assert.ok(syncs.every((record) => record.status === 'skipped' && record.reason === 'resident-report-unavailable'), 'READY without native live confirmation cannot claim an active generation')
   const multiStored = JSON.parse(readFileSync(registryMultiPath, 'utf8'))
-  assert.equal(multiStored.activeGenerationId, 'gen-two', 'registry must follow the latest live generation')
-  assert.equal(multiStored.internalRunId, 'run-multi')
+  assert.equal(multiStored.activeGenerationId, 'gen-old', 'READY alone cannot replace the last source-bound live generation')
+  assert.equal(multiStored.internalRunId, 'run-old', 'READY without native report cannot transfer resident ownership')
   assert.equal(multiStored.activeMinor, 'portal-multi.1')
   checks++
 

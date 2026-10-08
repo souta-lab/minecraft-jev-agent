@@ -63,7 +63,9 @@ export function buildCampaignCurrent({ registry = null, state = {}, report = nul
   const observedAt = live?.currentInventoryObservation?.observedAt ?? null
   const ageMs = observedAt === null ? null : Date.parse(generatedAt) - Date.parse(observedAt)
   const fresh = Number.isFinite(ageMs) && ageMs >= -2000 && ageMs <= 15_000
-  const usable = registry?.status === 'active' && resident?.alive === true && resident?.identityMatches === true && live?.connected === true && live?.status?.running === true && live?.generationId != null && fresh
+  const matchedResident = resident?.alive === true && resident?.identityMatches === true && live?.connected === true && fresh
+  const usable = registry?.status === 'active' && matchedResident && live?.status?.running === true && live?.generationId != null
+  const quiesced = matchedResident && live?.frozen === true && live?.generationId == null
   const status = usable ? live.status : null
   const drift = []
   const compare = (field, registered, observed) => {
@@ -79,6 +81,12 @@ export function buildCampaignCurrent({ registry = null, state = {}, report = nul
     compare('policyProfile', registry.policyProfile, status.policyProfile)
     compare('policyModel', registry.policyModel, status.policyModel)
     if (status.treeDirty !== false) drift.push('generationTreeDirtyOrUnknown')
+  } else if (quiesced) {
+    compare('internalRunId', registry.internalRunId, live.runId)
+    compare('activeGenerationId', registry.activeGenerationId, null)
+    compare('hostBootSha', registry.hostBootSha, live.currentInventoryObservation?.sourceSha)
+    compare('serverId', `127.0.0.1:${registry.port}`, live.worldKey?.serverId)
+    if (registry.lifecycle !== 'frozen') drift.push('lifecycle')
   }
   const intent = registry ?? state.liveProvenance ?? {}
   const runId = registry?.runId ?? state.activeRun ?? null
@@ -92,10 +100,10 @@ export function buildCampaignCurrent({ registry = null, state = {}, report = nul
     record: 'campaign-current/v1', generatedAt, derivedOnly: true,
     authority: 'Live server/resident and Kernel/VERIFY; this is a disposable projection, never SUCCESS authority.',
     lifecycle: {
-      evidence: usable ? (drift.length ? 'UNKNOWN_PROVENANCE_DRIFT' : 'LIVE') : 'UNKNOWN_NO_MATCHED_LIVE_RESIDENT',
-      registryStatus: registry?.status ?? 'absent', connected: usable ? live.connected : null,
-      frozen: usable ? live.frozen : null, processes, drift,
-      recordedLifecycle: text((registry ?? state.liveProvenance)?.status),
+      evidence: usable ? (drift.length ? 'UNKNOWN_PROVENANCE_DRIFT' : 'LIVE') : quiesced ? (drift.length ? 'UNKNOWN_PROVENANCE_DRIFT' : 'FROZEN') : 'UNKNOWN_NO_MATCHED_LIVE_RESIDENT',
+      registryStatus: registry?.status ?? 'absent', connected: usable || quiesced ? live.connected : null,
+      frozen: usable || quiesced ? live.frozen : null, processes, drift,
+      recordedLifecycle: text((registry ?? state.liveProvenance)?.lifecycle ?? (registry ?? state.liveProvenance)?.status),
     },
     freshness: { generatedAt, residentInventoryObservedAt: observedAt, ageMs: Number.isFinite(ageMs) ? ageMs : null, status: fresh ? 'FRESH' : (observedAt ? 'STALE' : 'UNKNOWN'), maxAgeMs: 15_000 },
     campaign: {
@@ -107,7 +115,7 @@ export function buildCampaignCurrent({ registry = null, state = {}, report = nul
       mainHead: mainSha,
       generationId: usable ? live.generationId ?? null : null,
       generationSourceSha: status?.sourceSha ?? null, generationBuildHash: status?.buildHash ?? null,
-      hostBootSha: usable ? live.currentInventoryObservation?.sourceSha ?? null : null,
+      hostBootSha: usable || quiesced ? live.currentInventoryObservation?.sourceSha ?? null : null,
       lastGenerationSourceRecorded: intent.generationSourceSha ?? null,
     },
     serving: status ? {
@@ -119,6 +127,12 @@ export function buildCampaignCurrent({ registry = null, state = {}, report = nul
       health: status.truth?.health ?? null, food: status.truth?.food ?? null, inventory,
       currentAction: text(status.currentAction?.id ?? status.currentAction),
       queueHead: queue ? { id: queue.id, kind: queue.kind, targetItem: queue.targetItem ?? null, description: text(queue.description, 160) } : null,
+      reconnectsThisHost: live.reconnect?.reconnects ?? null,
+    } : quiesced ? {
+      worldKey: live.worldKey ?? live.currentInventoryObservation?.worldKey ?? null,
+      position: null, health: null, food: null,
+      inventory: live.currentInventoryObservation?.counts ?? null,
+      currentAction: null, queueHead: null,
       reconnectsThisHost: live.reconnect?.reconnects ?? null,
     } : null,
     missionHistory: {

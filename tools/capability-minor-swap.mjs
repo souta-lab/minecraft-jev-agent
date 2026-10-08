@@ -24,6 +24,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { updateActiveRunMinor } from './capability-run.mjs'
+import { readResidentReport } from './current-status.mjs'
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_REGISTRY = join(resolve(TOOL_DIR, '..'), 'runs/capability-campaign/active-run.json')
@@ -60,7 +61,47 @@ function readRegistry(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
 }
 
-function main() {
+export function verifyLiveGenerationForSwap({ current, ready, boundary, residentPid, report, now = Date.now(), isAlive = pidAlive } = {}) {
+  const live = report?.data ?? report
+  if (!live || typeof live !== 'object') throw new Error('native resident report unavailable; refusing unverified provenance')
+  if (live.frozen === true || live.generationId == null) throw new Error('native resident report is frozen or has no active generation')
+  if (live.connected !== true || live.status?.running !== true) throw new Error('native resident report is not connected with a running generation')
+  if (live.runId !== ready.runId || live.generationId !== ready.generationId || live.status?.sourceSha !== ready.sourceSha) {
+    throw new Error('native resident report does not match the candidate GENERATION_READY')
+  }
+  if (ready.buildHash && live.status?.buildHash !== ready.buildHash) {
+    throw new Error('native resident report build hash does not match the candidate GENERATION_READY')
+  }
+  const expectedServerId = Number.isInteger(current.port) ? `127.0.0.1:${current.port}` : null
+  if (expectedServerId !== null && live.worldKey?.serverId !== expectedServerId) {
+    throw new Error('native resident report is connected to a different server')
+  }
+  const observedAt = Date.parse(live.currentInventoryObservation?.observedAt ?? '')
+  if (!Number.isFinite(observedAt) || now - observedAt < -2000 || now - observedAt > 15_000) {
+    throw new Error('native resident report inventory observation is stale or missing')
+  }
+  const hostBootSha = live.currentInventoryObservation?.sourceSha
+  if (typeof hostBootSha !== 'string' || !/^[0-9a-f]{40}$/u.test(hostBootSha)) {
+    throw new Error('native resident report has no valid HOST boot SHA')
+  }
+  if (boundary === 'generation-reload') {
+    if (!isAlive(current.residentPid)) throw new Error(`resident pid ${current.residentPid} is not alive`)
+    if (residentPid !== current.residentPid || ready.runId !== current.internalRunId) {
+      throw new Error('generation-reload requires unchanged resident PID and internal run ID')
+    }
+  } else if (boundary === 'resident-restart') {
+    if (!Number.isInteger(residentPid) || !isAlive(residentPid)) throw new Error(`resident pid ${residentPid} is not alive`)
+    if (residentPid === current.residentPid || ready.runId === current.internalRunId) {
+      throw new Error('resident-restart requires a new resident PID and internal run ID')
+    }
+    if (hostBootSha !== ready.sourceSha) throw new Error('resident restart HOST boot SHA does not match the new resident source')
+  } else {
+    throw new Error(`unsupported boundary ${boundary}`)
+  }
+  return { live, hostBootSha }
+}
+
+async function main() {
   const o = parseArgs(process.argv.slice(2))
   const registryPath = o.registry ?? DEFAULT_REGISTRY
   const required = ['minor', 'sha', 'boundary']
@@ -82,6 +123,14 @@ function main() {
     throw new Error(`GENERATION_READY sourceSha=${ready.sourceSha} != --sha ${o.sha}; refusing unverified provenance`)
   }
 
+  const runtimeDir = o['runtime-dir'] ?? current.runtimeDir
+  if (typeof runtimeDir !== 'string' || !existsSync(runtimeDir)) throw new Error(`runtime directory missing: ${runtimeDir}`)
+  const residentPid = o.boundary === 'generation-reload' ? current.residentPid : Number(o['resident-pid'])
+  const residentReport = await readResidentReport(join(runtimeDir, 'data', 'resident', 'control.sock'), 2000)
+  const { hostBootSha } = verifyLiveGenerationForSwap({
+    current, ready, boundary: o.boundary, residentPid, report: residentReport,
+  })
+
   const fields = {
     activeMinor: o.minor,
     segmentId: o.minor,
@@ -99,26 +148,25 @@ function main() {
     }
     if (!pidAlive(current.residentPid)) throw new Error(`resident pid ${current.residentPid} is not alive`)
     fields.residentPid = current.residentPid
-    fields.hostBootSha = current.hostBootSha ?? current.sha
+    fields.hostBootSha = hostBootSha
   } else {
     const pid = Number(o['resident-pid'])
-    if (!pidAlive(pid)) throw new Error(`--resident-pid ${o['resident-pid']} is not alive`)
     fields.residentPid = pid
-    fields.hostBootSha = o.sha
+    fields.hostBootSha = hostBootSha
     if (typeof o['resident-stdout'] === 'string') fields.residentStdout = o['resident-stdout']
   }
 
   if (typeof o['runtime-dir'] === 'string') {
-    if (!existsSync(o['runtime-dir'])) throw new Error(`--runtime-dir missing: ${o['runtime-dir']}`)
     fields.runtimeDir = o['runtime-dir']
   }
+  fields.lifecycle = 'active'
 
   const next = updateActiveRunMinor(fields, registryPath)
   process.stdout.write(`${JSON.stringify({ ok: true, boundary: o.boundary, activeMinor: next.activeMinor, sha: next.sha, generationSourceSha: next.generationSourceSha, internalRunId: next.internalRunId, residentPid: next.residentPid, hostBootSha: next.hostBootSha }, null, 2)}\n`)
 }
 
 if (import.meta.main) {
-  try { main() } catch (error) {
+  try { await main() } catch (error) {
     process.stderr.write(`capability-minor-swap: ${error instanceof Error ? error.message : String(error)}\n`)
     process.exitCode = 1
   }
