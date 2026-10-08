@@ -258,14 +258,15 @@ try {
   mkdirSync(frozenRegistryDir, { recursive: true })
   const frozenRegistryPath = join(frozenRegistryDir, 'active-run.json')
   const bootSha = 'd'.repeat(40)
+  const previousSha = 'c'.repeat(40)
   const stagedSha = 'e'.repeat(40)
   writeActiveRunRegistry({
     record: 'capability-active-run', schemaVersion: 1, status: 'active',
     runId: 'portal-frozen', runDir: join(frozenRegistryDir, 'runs/portal-frozen'),
     claimToken: 'portal-frozen#old', activeMinor: 'portal-frozen.2', segmentId: 'portal-frozen.2',
-    runtimeDir: frozenDriver, runnerPid: 10, residentPid: 20, supervisorPid: 30,
+    runtimeDir: frozenDriver, runnerPid: 30, residentPid: 20, supervisorPid: 30,
     internalRunId: 'run-frozen', activeGenerationId: 'gen-disposed',
-    sha: stagedSha, generationSourceSha: stagedSha, hostBootSha: 'f'.repeat(40),
+    sha: previousSha, generationSourceSha: previousSha, generationBuildHash: 'prior-build', hostBootSha: 'f'.repeat(40),
     lifecycle: 'frozen', boundary: 'resident-restart',
   }, frozenRegistryPath)
   const frozenSync = syncActiveRunRegistryOnReady({
@@ -275,41 +276,50 @@ try {
   })
   assert.equal(frozenSync.status, 'updated')
   assert.equal(frozenSync.reason, 'native-report-frozen')
+  assert.equal(frozenSync.residentRestart, false)
   const frozenStored = JSON.parse(readFileSync(frozenRegistryPath, 'utf8'))
   assert.equal(frozenStored.activeGenerationId, null, 'a disposed staged generation is not active')
   assert.equal(frozenStored.lifecycle, 'frozen')
   assert.equal(frozenStored.boundary, 'generation-reload', 'same PID and internal run means no resident restart')
   assert.equal(frozenStored.hostBootSha, bootSha, 'native report preserves the original HOST boot SHA')
+  assert.equal(frozenStored.sha, previousSha, 'a source-loaded frozen-deferred candidate is not committed')
+  assert.equal(frozenStored.generationSourceSha, previousSha, 'deferred candidate source is not recorded as active')
+  assert.equal(frozenStored.generationBuildHash, 'prior-build', 'deferred candidate build is not recorded as active')
   assert.equal(frozenStored.residentPid, 20)
   assert.equal(frozenStored.internalRunId, 'run-frozen')
   checks++
 
-  // A live generation advance inside the same resident records a generation
-  // reload and leaves HOST boot provenance untouched.
-  const reloadReady = { runId: 'run-frozen', generationId: 'gen-live', sourceSha: stagedSha, buildHash: 'bh2' }
+  // A later live SHA succession inside the same resident commits the candidate
+  // as a generation reload, not a resident restart, and preserves HOST boot.
+  const reloadReady = { runId: 'run-frozen', generationId: 'gen-live', sourceSha: stagedSha, buildHash: 'bh2', treeDirty: false }
   const reloaded = syncActiveRunRegistryOnReady({
     registryPath: frozenRegistryPath, driverDir: frozenDriver, childPid: 20, supervisorPid: 30,
     ready: reloadReady,
+    successionDeps: { isAlive: () => true, gitHead: () => stagedSha, gitDirty: () => false, gitAncestor: () => true },
     residentReport: nativeReport({ runId: 'run-frozen', generationId: 'gen-live', sourceSha: stagedSha, buildHash: 'bh2', hostBootSha: bootSha, residentPid: 20 }),
   })
   assert.equal(reloaded.status, 'updated')
+  assert.equal(reloaded.residentRestart, false, 'SHA succession with unchanged PID/run is not a resident restart')
   const reloadedStored = JSON.parse(readFileSync(frozenRegistryPath, 'utf8'))
   assert.equal(reloadedStored.activeGenerationId, 'gen-live')
   assert.equal(reloadedStored.boundary, 'generation-reload')
+  assert.equal(reloadedStored.sha, stagedSha)
+  assert.equal(reloadedStored.generationSourceSha, stagedSha)
   assert.equal(reloadedStored.hostBootSha, bootSha)
   assert.equal(reloadedStored.lifecycle, 'active', 'native live generation report clears frozen lifecycle')
   checks++
 
-  // ---- sha succession gate: admitted only on dead owner + clean ready + HEAD + clean tree
+  // ---- SHA succession keeps generation-reload semantics for the same resident
   const allDead = () => false
-  const cleanReady = { runId: 'run-s2', generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', treeDirty: false }
+  const cleanReady = { runId: 'run-old', generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', treeDirty: false }
+  const successionBootSha = 'b'.repeat(40)
   writeActiveRunRegistry({
     record: 'capability-active-run', schemaVersion: 1, status: 'active',
     runId: 'portal-test', runDir: join(registryDir, 'runs/portal-test'),
     claimToken: 'portal-test#old', activeMinor: 'portal-test.9', segmentId: 'portal-test.9',
-    runtimeDir: driverRegistry, runnerPid: 10, residentPid: 20, supervisorPid: 30,
+    runtimeDir: driverRegistry, runnerPid: 30, residentPid: 20, supervisorPid: 30,
     internalRunId: 'run-old', activeGenerationId: 'gen-old',
-    sha: sourceSha, generationSourceSha: sourceSha, hostBootSha: sourceSha,
+    sha: sourceSha, generationSourceSha: sourceSha, hostBootSha: successionBootSha,
   }, registryPath)
   const depsFor = (over = {}) => ({
     isAlive: allDead,
@@ -319,19 +329,23 @@ try {
     ...over,
   })
   const admit = syncActiveRunRegistryOnReady({
-    registryPath, driverDir: driverRegistry, childPid: 777, supervisorPid: 555,
-    ready: cleanReady, successionDeps: depsFor(),
-    residentReport: nativeReport({ runId: 'run-s2', generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', residentPid: 777 }),
+    registryPath, driverDir: driverRegistry, childPid: 20, supervisorPid: 30,
+    ready: cleanReady,
+    successionDeps: { isAlive: () => true, gitHead: () => 'c'.repeat(40), gitDirty: () => false, gitAncestor: () => true },
+    residentReport: nativeReport({ runId: 'run-old', generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', hostBootSha: successionBootSha, residentPid: 20 }),
   })
-  assert.equal(admit.status, 'updated', `succession must admit dead owner + clean ready + HEAD match: ${JSON.stringify(admit)}`)
+  assert.equal(admit.status, 'updated', `same-resident succession must admit clean ready + HEAD match: ${JSON.stringify(admit)}`)
+  assert.equal(admit.residentRestart, false, 'clean SHA succession alone does not change resident identity')
   const admitted = JSON.parse(readFileSync(registryPath, 'utf8'))
   assert.equal(admitted.generationSourceSha, 'c'.repeat(40))
   assert.equal(admitted.sha, 'c'.repeat(40))
   assert.equal(admitted.generationBuildHash, 'bh2')
   assert.equal(admitted.treeDirty, false)
-  assert.equal(admitted.hostBootSha, 'c'.repeat(40))
-  assert.equal(admitted.residentPid, 777)
-  assert.equal(admitted.boundary, 'resident-restart')
+  assert.equal(admitted.hostBootSha, successionBootSha, 'SHA succession preserves HOST boot SHA')
+  assert.equal(admitted.residentPid, 20)
+  assert.equal(admitted.internalRunId, 'run-old')
+  assert.equal(admitted.activeGenerationId, 'gen-s2')
+  assert.equal(admitted.boundary, 'generation-reload')
   checks++
 
   // fail-closed variants of the same succession
@@ -358,7 +372,7 @@ try {
     const out = syncActiveRunRegistryOnReady({
       registryPath, driverDir: driverRegistry, childPid: 777, supervisorPid: 555,
       ready: readyOver ?? cleanReady, successionDeps: depsFor(depsOver),
-      residentReport: nativeReport({ runId: 'run-s2', generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', residentPid: 777 }),
+      residentReport: nativeReport({ runId: cleanReady.runId, generationId: 'gen-s2', sourceSha: 'c'.repeat(40), buildHash: 'bh2', residentPid: 777 }),
     })
     assert.deepEqual(out, { status: 'skipped', reason }, `${label}`)
   }

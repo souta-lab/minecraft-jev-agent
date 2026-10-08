@@ -592,6 +592,9 @@ export function syncActiveRunRegistryOnReady({
   const initialBind = launcherOwned && (current.residentPid ?? null) === null
   const sameResident = current.residentPid === childPid && current.internalRunId === ready.runId
   if (live.frozen === true && live.connected === true && live.generationId == null) {
+    // A READY line may describe a source-changed generation that was staged
+    // and then deferred by the frozen gate. Keep the last committed source and
+    // clear active-generation ownership until the native report proves resume.
     const fields = {
       runnerPid: launcherOwned ? current.runnerPid : supervisorPid,
       supervisorPid,
@@ -640,6 +643,8 @@ export function syncActiveRunRegistryOnReady({
     fields.generationBuildHash = ready.buildHash ?? null
     fields.treeDirty = false
   }
+  // Source SHA succession does not imply a HOST restart. Boundary and HOST
+  // boot provenance follow resident PID/run identity only.
   if (residentRestart) {
     fields.boundary = 'resident-restart'
     fields.hostBootSha = bootSha ?? ready.sourceSha
