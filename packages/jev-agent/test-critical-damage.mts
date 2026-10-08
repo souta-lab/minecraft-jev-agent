@@ -53,6 +53,7 @@ import {
   damageEndingCandidates,
   defaultCandidateOptions,
   foodHabitatAscent,
+  foodSourceGap,
   formatFoodHabitatRefused,
   generateCandidates,
   generateGroundedCandidates,
@@ -415,8 +416,8 @@ function queueWith(current: QueuedGoal): GoalQueueState {
 }
 
 /** The measured hunting shape: health 1, food 0, underground (y=53), no animal sensed. */
-function hungryUndergroundWorld(counts: Record<string, number>, entities: EntityState[] = []): WorldState {
-  const feet: Vec3Json = { x: 23, y: 53, z: 9 }
+function hungryUndergroundWorld(counts: Record<string, number>, entities: EntityState[] = [], y = 53): WorldState {
+  const feet: Vec3Json = { x: 23, y, z: 9 }
   return {
     schemaVersion: 1,
     tick: 7,
@@ -563,6 +564,53 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
       fedOffer.length === 2 && fedOffer[0]?.id === habitat.id && fedOffer[1]?.id === genericExplore.id &&
       attributedDamageOffer.length === 2 && attributedDamageOffer[0]?.id === habitat.id && attributedDamageOffer[1]?.id === genericExplore.id,
     `habitat=${habitat?.id ?? 'none'} starving=[${starvingOffer.map((candidate) => candidate.id).join(' ')}] fed=[${fedOffer.map((candidate) => candidate.id).join(' ')}] attributedDamage=[${attributedDamageOffer.map((candidate) => candidate.id).join(' ')}]`,
+  )
+}
+
+// The direct-source gap and the independent habitat route can coexist. The
+// body remains starving and no food is claimed while verified ascent evidence
+// narrows the route's height gap over successive fresh states.
+{
+  const sensedButUnroutableZombie: EntityState = {
+    id: 99,
+    name: 'zombie',
+    kind: 'hostile',
+    username: null,
+    position: { x: 31, y: 17, z: 9 },
+    distance: 8,
+    hostile: true,
+    lineOfSight: false,
+    heldItem: null,
+    attackedSelf: false,
+  }
+  const observations = [17, 18, 19, 20].map((y) => {
+    const state = hungryUndergroundWorld({ dirt: 8, iron_pickaxe: 1 }, [sensedButUnroutableZombie], y)
+    state.self = {
+      ...state.self,
+      position: { x: 23.5, y, z: 9.5 },
+      eyePosition: { x: 23.5, y: y + 1.62, z: 9.5 },
+    }
+    const ascent = foodHabitatAscent(state, defaultCandidateOptions)
+    const route = ascent.candidates.find((candidate) => candidate.meta.foodHabitat === true)
+    const gap = foodSourceGap(state, defaultCandidateOptions, ascent.candidates)
+    return { y, remainingHeight: ANIMAL_HABITAT_SEA_LEVEL - y, route, gap, state }
+  })
+  const measuredProgress = observations.every((sample, index) => {
+    if (index === 0) return sample.remainingHeight === ANIMAL_HABITAT_SEA_LEVEL - 17
+    const previous = observations[index - 1]
+    return previous !== undefined && sample.y > previous.y && sample.remainingHeight < previous.remainingHeight
+  })
+  const preservesDistinctTruth = observations.every(({ y, route, gap, state }) =>
+    state.self.health === 1 && state.self.food === 0 &&
+    route?.meta.ascentTargetY === ANIMAL_HABITAT_SEA_LEVEL && route.meta.foodHabitat === true &&
+    route.meta.foodRoute === undefined &&
+    gap?.reason === 'source_withheld' && gap.missingLink === 'no_route_to_sensed_source' &&
+    gap.sensedFoodMob === true && gap.offered.length === 0 && y < ANIMAL_HABITAT_SEA_LEVEL,
+  )
+  check(
+    '(e4) an underground starving ascent can make multi-step route progress while the direct food-source gap stays truthful',
+    observations.length === 4 && measuredProgress && preservesDistinctTruth,
+    `heights=[${observations.map(({ y, remainingHeight }) => `${y}->${remainingHeight}`).join(' ')}] routes=[${observations.map(({ route }) => route?.id ?? 'none').join(' ')}] gaps=[${observations.map(({ gap }) => `${gap?.reason ?? 'none'}/${gap?.missingLink ?? 'none'}`).join(' ')}]`,
   )
 }
 
