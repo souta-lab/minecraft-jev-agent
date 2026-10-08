@@ -391,6 +391,14 @@ addCase('a focused canopy log selects a distinct pickup-compatible stand and off
     position: feet,
     standable: [feet, pickupStand],
     blocks: [sensed],
+    signals: signals({
+      knownResources: [{
+        name: 'oak_log',
+        kind: 'log',
+        dimension: 'minecraft:overworld',
+        position: blockPosition,
+      }],
+    }),
     goalQueue: queueWith(queuedGoal({})),
   })
   const grounded = generateGroundedCandidates(state, options())
@@ -400,8 +408,56 @@ addCase('a focused canopy log selects a distinct pickup-compatible stand and off
     candidate.target?.y === pickupStand.y && candidate.target?.z === pickupStand.z,
   )
   return {
-    pass: selectedStand === pickupStand && move !== undefined && grounded.candidates.every((candidate) => candidate.id !== mineId),
-    detail: `selected=${JSON.stringify(selectedStand)} move=${move?.id ?? 'none'} unsafeMine=${grounded.candidates.some((candidate) => candidate.id === mineId)} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+    pass:
+      selectedStand === pickupStand &&
+      move !== undefined &&
+      grounded.candidates.every((candidate) => candidate.id !== mineId) &&
+      grounded.candidates.every((candidate) => candidate.kind !== 'RETRIEVE'),
+    detail: `selected=${JSON.stringify(selectedStand)} move=${move?.id ?? 'none'} unsafeMine=${grounded.candidates.some((candidate) => candidate.id === mineId)} retrieve=${grounded.candidates.some((candidate) => candidate.kind === 'RETRIEVE')} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+  }
+})
+
+addCase('a remembered in-reach log remains retrievable when its only sensed stand is blocked', () => {
+  const feet: Vec3Json = { x: 7210.4, y: 65, z: 1278.5 }
+  const logPosition: Vec3Json = { x: 7210, y: 69, z: 1278 }
+  const blockedStand: Vec3Json = { x: 7209, y: 70, z: 1278 }
+  const sensed = logBlock(logPosition, {
+    inReach: true,
+    visible: true,
+    distance: 4.05,
+    adjacentStandable: blockedStand,
+    hasAdjacentStandable: true,
+  })
+  const known: KnownResource = {
+    name: 'oak_log',
+    kind: 'log',
+    dimension: 'minecraft:overworld',
+    position: logPosition,
+  }
+  const state = worldState({
+    position: feet,
+    signals: signals({ knownResources: [known] }),
+    standable: [feet],
+    blocks: [sensed],
+    goalQueue: queueWith(queuedGoal({})),
+  })
+  const grounded = generateGroundedCandidates(state, {
+    ...options(),
+    blacklistedMoveTargets: (_dimension, position) =>
+      position.x === blockedStand.x && position.y === blockedStand.y && position.z === blockedStand.z,
+  })
+  const retrieveId = `RETRIEVE:known:log:${blockId('b', logPosition)}`
+  const sourceLocalRoutes = grounded.candidates.filter(
+    (candidate) =>
+      (candidate.kind === 'MINE' && candidate.target?.x === logPosition.x && candidate.target.y === logPosition.y && candidate.target.z === logPosition.z) ||
+      (candidate.kind === 'MOVE' &&
+        candidate.meta.targetBlockX === logPosition.x &&
+        candidate.meta.targetBlockY === logPosition.y &&
+        candidate.meta.targetBlockZ === logPosition.z),
+  )
+  return {
+    pass: grounded.candidates.some((candidate) => candidate.id === retrieveId) && sourceLocalRoutes.length === 0,
+    detail: `retrieve=${grounded.candidates.some((candidate) => candidate.id === retrieveId)} localRoutes=[${sourceLocalRoutes.map((candidate) => candidate.id).join(',')}] candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] withheld=[${grounded.withheld.map((entry) => `${entry.candidate.id}:${entry.result.reason}`).join(',')}]`,
   }
 })
 

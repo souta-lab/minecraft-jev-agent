@@ -11606,23 +11606,21 @@ function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueu
   return wants
 }
 
-function mineableNow(block: BlockState): boolean {
-  return block.diggable && block.inReach && block.visible !== false
-}
-
 /**
- * The sensed block that already serves the want THIS tick - the same
- * precondition as `mineCandidates`' MINE arm, so its presence means the item is
- * obtainable without leaving, and a remembered-coordinate trip must not be
- * offered on top of it.
+ * Find a sensed MINE/MOVE route that already serves the want THIS tick. A block's
+ * visibility and interaction reach alone do not mean its item can be obtained:
+ * collect MINEs must also be pickup-safe, and the matching stand/MINE must
+ * survive the same candidate and reachability gates as the ordinary source arm.
+ * A remembered-coordinate trip must only be suppressed when one of those
+ * grounded source candidates is actually offered.
  *
- * Presence in `state.blocks` alone is NOT a route: a log sensed only at
- * distance (live shape at y=33: surface logs 32 blocks above, no walk-up
- * access) cannot be mined here. Treating those as visible suppressed
- * `RETRIEVE:known:*`, which is the ascent leg that reaches the remembered
- * surface trees, and left the clearance MINE as the only action.
+ * Presence in `state.blocks` alone is NOT a route: logs sensed high above the
+ * body cannot be mined in place, and an in-reach log can still have no safe MINE
+ * or stand MOVE when the drop is outside the pickup envelope (p27.58). Treating
+ * either as obtainable suppressed `RETRIEVE:known:*`, the body-changing route
+ * that reaches the remembered resource.
  */
-function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
+function sensedResourceRouteFor(state: WorldState, options: CandidateOptions, want: RetrievalWant): BlockState | null {
   if (want.kind === 'structure') {
     // A structure route's target is the fortress body, not the wanted item: the
     // body block does not drop `blaze_rod` (`resourceMatches` is exact), so it
@@ -11632,23 +11630,60 @@ function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | 
     // stay with the existing combat/pickup machinery.
     return null
   }
-  // A live-structure member is NOT obtainable in place (mineCandidates refuses
-  // it), so it must not suppress the remembered-coordinate route either: the
+  // A live-structure member is NOT a source route (mineCandidates refuses it),
+  // so it must not suppress the remembered-coordinate route either: the
   // remembered route is how the plan re-sources the item elsewhere.
   const liveStructures = liveStructureIndexOf(state)
-  const mineableSource = (block: BlockState): boolean =>
-    !isLiveStructureMember(liveStructures, block.position) && mineableNow(block)
-  if (want.kind === 'ore') {
-    return (
-      state.blocks.find(
-        (block) =>
-          block.kind === 'ore' &&
-          (resourceMatches(block.yield, want.item) || want.blockNames.includes(block.name)) &&
-          mineableSource(block),
-      ) ?? null
-    )
+  const matchesWant = (block: BlockState): boolean =>
+    !isLiveStructureMember(liveStructures, block.position) &&
+    (want.kind === 'ore'
+      ? block.kind === 'ore' && (resourceMatches(block.yield, want.item) || want.blockNames.includes(block.name))
+      : block.kind === 'log')
+  const sources = state.blocks.filter(matchesWant)
+  if (sources.length === 0) return null
+
+  const sourceCells = new Set(sources.map((block) => blockCellKey(block.position)))
+  const localRoutes = mineCandidates(state, options, want.item, null, (block) =>
+    sourceCells.has(blockCellKey(block.position)),
+  ).filter((candidate) => candidate.kind === 'MINE' || candidate.kind === 'MOVE')
+  if (localRoutes.length === 0) return null
+
+  const context: ReachabilityGateContext = {
+    state,
+    options,
+    memory: null,
+    column: columnFacts(state, options.recipes ?? null),
   }
-  return state.blocks.find((block) => block.kind === 'log' && mineableSource(block)) ?? null
+  for (const candidate of localRoutes) {
+    const targetBlock =
+      candidate.kind === 'MOVE'
+        ? sources.find(
+            (block) =>
+              candidate.meta.targetBlockX === block.position.x &&
+              candidate.meta.targetBlockY === block.position.y &&
+              candidate.meta.targetBlockZ === block.position.z,
+          )
+        : sources.find((block) => {
+            if (
+              candidate.target?.x === block.position.x &&
+              candidate.target.y === block.position.y &&
+              candidate.target.z === block.position.z
+            ) {
+              return true
+            }
+            return (
+              candidate.meta[COLUMN_DIG_META] === true &&
+              candidate.target?.x === block.position.x &&
+              candidate.target.z === block.position.z &&
+              typeof candidate.meta.columnTopY === 'number' &&
+              candidate.meta.columnTopY >= block.position.y
+            )
+          })
+    if (targetBlock === undefined) continue
+    const reachability = evaluateCandidate(candidate, context)
+    if (reachability === null || reachability.result.reachable) return targetBlock
+  }
+  return null
 }
 
 function knownResourceFor(
@@ -13875,7 +13910,7 @@ function retrievalCandidatesForWant(
   want: RetrievalWant,
   digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
-  if (mineableBlockFor(state, want) !== null) return []
+  if (sensedResourceRouteFor(state, options, want) !== null) return []
   const knowns = knownResourcesFor(
     state,
     want,
