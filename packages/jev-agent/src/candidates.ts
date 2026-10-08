@@ -4070,11 +4070,19 @@ export function generateGroundedCandidates(
   let grounded = ground(raw.candidates, raw.foodHabitatRefusal)
   const initialFoodGap = foodSourceGap(state, options, grounded.candidates)
   // Entity sensing is not proof that the body can reach the producer. Only ask
-  // for the general habitat route when the ordinary candidates have gone
-  // through the same grounding gate and still provide no food route. This keeps
-  // the reachable-animal control concise while preserving ascent when a sensed
-  // animal is trapped behind a route the body cannot ground.
-  if (initialFoodGap !== null) {
+  // for the general habitat route when ordinary candidates have gone through
+  // the same grounding gate and either provide no food route or only offer
+  // hostile mob-drop routes. A mob-drop route is prospective combat: it creates
+  // no edible item until the model chooses and the kill succeeds, so a decline
+  // must not remove the independent route toward animal habitat. Keep the
+  // reachable passive-animal route concise, and leave both alternatives in the
+  // same grounded offer for Typed Decision Plane choice.
+  const offeredFoodRoutes = grounded.candidates.filter(
+    (candidate) => typeof candidate.meta.foodRoute === 'string',
+  )
+  const onlyMobDropRoutes =
+    offeredFoodRoutes.length > 0 && offeredFoodRoutes.every((candidate) => candidate.meta.foodRoute === 'mob_drop')
+  if (initialFoodGap !== null || onlyMobDropRoutes) {
     const habitat = foodHabitatAscent(state, options)
     if (habitat.candidates.length > 0 || habitat.refusal !== null) {
       grounded = ground([...raw.candidates, ...habitat.candidates], habitat.refusal)
@@ -7362,10 +7370,11 @@ export function formatFoodHabitatRefused(refusal: SurfaceAscentRefusal): string 
 /**
  * The hungry body's vertical route to animal habitat.
  *
- * Called by `generateGroundedCandidates` only after ordinary food candidates
- * are grounded and no food route remains. A sensed animal is not itself a route;
- * its contact offer may be withheld by reachability while this existing ascent
- * is the only grounded way toward a habitat. At or above the band the body is
+ * Called by `generateGroundedCandidates` only after ordinary candidates are
+ * grounded and no food route remains, or the only offered routes are prospective
+ * hostile mob-drop hunts. A sensed animal is not itself a route; its contact
+ * offer may be withheld by reachability while this existing ascent is the only
+ * grounded way toward a habitat. At or above the band the body is
  * already where animals can spawn, so no upward route is offered (see the band
  * check below). It reuses the SAME `planVerticalApproachDetailed` machinery as
  * the `surface` goal and MOVE/RETRIEVE ascents, and returns the same typed

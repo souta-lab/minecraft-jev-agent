@@ -471,8 +471,9 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
     typed,
     refusal === null ? 'refusal=null' : `"${formatFoodHabitatRefused(refusal)}"`,
   )
-  // A grounded contact route makes the habitat ascent redundant. Merely
-  // sensing an animal is not the proof; this nearby cow is actually offered.
+  // A grounded passive-animal route keeps the independent habitat ascent
+  // redundant. Merely sensing an animal is not the proof; this nearby cow is
+  // actually offered.
   const cow: EntityState = {
     id: 7,
     name: 'cow',
@@ -489,9 +490,72 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
   const animalRoute = withAnimal.candidates.some((candidate) => candidate.meta.foodRoute === 'animal')
   const habitatRoute = withAnimal.candidates.some((candidate) => candidate.meta.foodHabitat === true)
   check(
-    '(e) a grounded animal route keeps the redundant habitat ascent out of the offer',
+    '(e) a grounded passive-animal route keeps the redundant habitat ascent out of the offer',
     animalRoute && !habitatRoute,
     `animalRoute=${animalRoute} habitatRoute=${habitatRoute}`,
+  )
+}
+
+// p27.37: a hostile contact-ascent tagged as a prospective mob-drop route is
+// not an edible item and can be declined. Keep the independently grounded
+// habitat escape in the same typed choice after both CAN reachability and the
+// starvation survival filter have run. Neither route is selected here.
+{
+  const zombie: EntityState = {
+    id: 73,
+    name: 'zombie',
+    kind: 'hostile',
+    username: null,
+    position: { x: 23, y: 61, z: 9 },
+    distance: 8,
+    hostile: true,
+    lineOfSight: false,
+    heldItem: null,
+    attackedSelf: false,
+  }
+  const state = hungryUndergroundWorld({ cobblestone: 64 }, [zombie])
+  const explore: QueuedGoal = {
+    ...queuedFood(),
+    id: 'g9:explore',
+    kind: 'explore',
+    description: 'explore cave terrain',
+    targetItem: 'explore',
+    requiredCount: 1,
+    optionInstanceId: 'explore:cave',
+    optionTemplateId: 'explore:cave',
+  }
+  state.goal = {
+    ...foodGoal(),
+    id: 'g9:explore',
+    description: 'explore cave terrain',
+    targetItem: 'explore',
+    requiredCount: 1,
+  }
+  state.goalQueue = queueWith(explore)
+
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const survivalOffer = restrictCandidatesDuringCriticalDamage(state, grounded.candidates)
+  const contact = survivalOffer.find(
+    (candidate) => candidate.meta.contactAscent === true && candidate.meta.foodRoute === 'mob_drop',
+  )
+  const habitat = survivalOffer.find((candidate) => candidate.meta.foodHabitat === true)
+  const offeredFoodRoutes = grounded.candidates.filter((candidate) => typeof candidate.meta.foodRoute === 'string')
+  const ids = survivalOffer.map((candidate) => candidate.id)
+  const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index)
+  check(
+    '(e5) starving explore:cave keeps both grounded zombie contact and independent habitat routes in the typed choice without labeling habitat edible',
+    state.self.health === 1 &&
+      state.self.food === 0 &&
+      contact !== undefined &&
+      habitat !== undefined &&
+      habitat.meta.foodRoute === undefined &&
+      offeredFoodRoutes.length === 1 &&
+      offeredFoodRoutes[0]?.meta.contactAscent === true &&
+      duplicates.length === 0,
+    `health=${state.self.health} food=${state.self.food} goal=${state.goalQueue?.current?.optionInstanceId ?? 'none'} ` +
+      `contact=${contact?.id ?? 'none'} habitat=${habitat?.id ?? 'none'} ` +
+      `routes=[${offeredFoodRoutes.map((candidate) => `${candidate.id}:${String(candidate.meta.foodRoute)}`).join(' ')}] ` +
+      `duplicates=[${duplicates.join(' ')}]`,
   )
 }
 
