@@ -14454,12 +14454,22 @@ function disengageSpots(
   if (points.length < 2) return []
   const worst = (p: Vec3Json): number => Math.min(...points.map((t) => distance(p, t.position)))
   const currentWorst = worst(state.self.position)
+  // The strict keep-distance solver already excludes the body's current feet
+  // cell. This last-resort pincer fallback must apply the same boundary: using
+  // the integer cell corner against fractional self coordinates can make the
+  // current stand appear to improve worst-case separation and produce a
+  // successful RETREAT with no movement (measured p27.44).
+  const currentFeetCell = blockId('p', {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  })
   const transfer = new Set((state.terrain.portalWalkInCells ?? []).map((cell) => blockId('p', cell)))
   const cells: { spot: Vec3Json; worst: number; escape: boolean }[] = []
   const seen = new Set<string>()
   const consider = (spot: Vec3Json, escape: boolean): void => {
     const key = blockId('p', spot)
-    if (seen.has(key) || transfer.has(key)) return
+    if (key === currentFeetCell || seen.has(key) || transfer.has(key)) return
     seen.add(key)
     const w = worst(spot)
     if (w <= currentWorst + DISENGAGE_MIN_IMPROVEMENT) return

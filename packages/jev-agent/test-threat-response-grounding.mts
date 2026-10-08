@@ -538,6 +538,48 @@ addCase('(i6) a body pocketed between two hostiles still gets a disengage offer,
   }
 })
 
+addCase('(i6a) the multi-hostile disengage fallback excludes the current feet cell', () => {
+  // Source-bound p27.44: RETREAT:p7177_41_1256 was exactly the body's feet
+  // cell. The strict keep-distance solver excluded it, but three nearby
+  // hostiles left no strict spot, so `disengageSpots` re-admitted the rounded
+  // cell as a >0.5 m worst-case gain. Keep a distinct least-bad step available.
+  const self: Vec3Json = { x: 0.9, y: 59, z: 0.9 }
+  const currentFeetCell: Vec3Json = { x: 0, y: 59, z: 0 }
+  const westStep: Vec3Json = { x: 0, y: 59, z: 1 }
+  const skeleton = entity(911, 'skeleton', { x: 4, y: 59, z: 3 }, true, { attackedSelf: true }, self)
+  const drowned = entity(912, 'drowned', { x: 4, y: 59, z: 4 }, true, { attackedSelf: true }, self)
+  const state = noteThreat(
+    measuredBody({
+      self: selfState(self, { health: 1, food: 0 }),
+      entities: [skeleton, drowned],
+      terrain: {
+        standable: [currentFeetCell, westStep],
+        escapeCells: [currentFeetCell, westStep],
+        portalWalkInCells: [],
+      },
+      signals: signals({ stalledMs: 0, lastDamage: null }),
+    }),
+  )
+  const generated = generateGroundedCandidates(
+    state,
+    withProbe(defaultCandidateOptions, {
+      pathProbe: () => 'reachable',
+      attackPathProbe: () => 'reachable',
+    }),
+  )
+  const retreats = generated.candidates.filter((candidate) => candidate.kind === 'RETREAT')
+  const roundedNoOp = retreats.find((candidate) =>
+    candidate.target?.x === currentFeetCell.x && candidate.target.y === currentFeetCell.y && candidate.target.z === currentFeetCell.z,
+  )
+  const retainedDisengage = retreats.find((candidate) =>
+    candidate.target?.x === westStep.x && candidate.target.y === westStep.y && candidate.target.z === westStep.z && candidate.meta.disengage === true,
+  )
+  return {
+    pass: roundedNoOp === undefined && retainedDisengage !== undefined,
+    detail: `currentFeet=${roundedNoOp?.id ?? 'excluded'} distinctDisengage=${retainedDisengage?.id ?? 'missing'} offered=[${retreats.map((candidate) => `${candidate.id}${candidate.meta.disengage === true ? ':disengage' : ''}`).join(',')}]`,
+  }
+})
+
 addCase('(i7) the disengage fallback stays silent when a real keep-distance spot exists', () => {
   // Same pocket, but a far east cell that satisfies the STRICT solver: it
   // reaches past the drowned standoff while gaining on the skeleton without
