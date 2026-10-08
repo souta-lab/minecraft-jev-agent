@@ -5339,6 +5339,7 @@ export class Executor {
     }
     const block = this.currentBlockAt(dig)
     if (block === null || block.boundingBox === 'empty') {
+      const startY = this.bot.entity.position.y
       this.setPhase(candidate, epoch, 'stepping')
       try {
         await this.pathTo(step, epoch, signal, 'GoalBlock', { requireLevel: true })
@@ -5354,7 +5355,15 @@ export class Executor {
           `vertical step did not reach (${step.x},${step.y},${step.z}) from (${round2(this.bot.entity.position.x)},${round2(this.bot.entity.position.y)},${round2(this.bot.entity.position.z)})`,
         )
       }
-      return false
+      // A previously-open step is still a completed vertical leg when the body
+      // actually changes floor toward its selected target. Returning false here
+      // made a retry ignore its already-cleared waypoint and immediately path to
+      // the distant resource, even after GoalBlock had reached the step.
+      return verticalStepTowardTarget({
+        startY,
+        currentY: this.bot.entity.position.y,
+        targetY: candidate.target?.y ?? step.y,
+      })
     }
     this.setPhase(candidate, epoch, 'digging')
     const live = this.resolveLiveClearanceTool(block)

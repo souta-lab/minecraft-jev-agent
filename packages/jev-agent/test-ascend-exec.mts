@@ -231,18 +231,28 @@ interface CapturedLog {
   detail: Record<string, unknown>
 }
 
-function makeCapturingLogger(logs: CapturedLog[]): EventLogger {
+function makeCapturingLogger(logs: CapturedLog[], observe?: (line: CapturedLog) => void): EventLogger {
   const writer = {
     write: (record: { source?: string; message?: string; detail?: Record<string, unknown> }): void => {
       if (typeof record.message !== 'string') return
-      logs.push({ source: record.source ?? 'unknown', message: record.message, detail: record.detail ?? {} })
+      const line = { source: record.source ?? 'unknown', message: record.message, detail: record.detail ?? {} }
+      logs.push(line)
+      observe?.(line)
     },
   } as unknown as JsonlWriter
   return new EventLogger(writer, false)
 }
 
-function makeStructuralBot(goalLog?: string[]): { bot: Bot; position: P } {
-  const position = new P(BODY_FEET.x + 0.5, BODY_FEET.y, BODY_FEET.z + 0.5)
+function makeStructuralBot(
+  goalLog?: string[],
+  options: {
+    start?: Vec3Json
+    blockAt?: (position: { x: number; y: number; z: number }) => { name: string; boundingBox: string }
+    goalReach?: (goal: { constructor?: { name?: string }; x?: number; y?: number; z?: number }) => boolean
+  } = {},
+): { bot: Bot; position: P } {
+  const start = options.start ?? { x: BODY_FEET.x + 0.5, y: BODY_FEET.y, z: BODY_FEET.z + 0.5 }
+  const position = new P(start.x, start.y, start.z)
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const emit = (event: string, payload?: unknown): void => {
     for (const handler of [...(listeners.get(event) ?? [])]) handler(payload)
@@ -272,6 +282,7 @@ function makeStructuralBot(goalLog?: string[]): { bot: Bot; position: P } {
       count: (name: string): number => (name === 'cobblestone' ? 402 : 0),
     },
     blockAt: (v: { x: number; y: number; z: number }): { name: string; boundingBox: string } => {
+      if (options.blockAt !== undefined) return options.blockAt(v)
       // Solid floor below the feet, air everywhere above: a pillar column.
       if (Math.floor(v.y) <= BODY_FEET.y - 1) return { name: 'stone', boundingBox: 'block' }
       return { name: 'air', boundingBox: 'empty' }
@@ -303,6 +314,7 @@ function makeStructuralBot(goalLog?: string[]): { bot: Bot; position: P } {
         void emit
         if (goalLog === undefined) return
         goalLog.push(goal.constructor?.name ?? 'unknown')
+        if (options.goalReach !== undefined && !options.goalReach(goal)) return
         // Simulate the stock path walk: the body lands inside the goal cell and
         // the pathfinder reports arrival, exactly what `waitForGoal` listens for.
         if (typeof goal.x === 'number' && typeof goal.y === 'number' && typeof goal.z === 'number') {
@@ -645,6 +657,81 @@ addCase('a staircase-up step paths with an occupancy goal (GoalBlock), never adj
   return {
     pass: stepped && adjacency === 0 && occupancy > 0,
     detail: `ASCEND_STEP=${logs.some((line) => line.message.startsWith('ASCEND_STEP'))} goals=[${goals.join(',')}]`,
+  }
+})
+
+addCase('an already-cleared retrieval step returns its vertical chunk before the distant approach', async () => {
+  const step = { x: 12, y: 31, z: 25 }
+  const farTarget = { x: 12, y: 49, z: 29 }
+  const candidate: Candidate = {
+    id: 'RETRIEVE:known:log:b12_49_29',
+    kind: 'RETRIEVE',
+    label: 'return to remembered birch_log above through the already-cleared staircase step',
+    targetName: 'birch_log',
+    target: farTarget,
+    targetEntityId: null,
+    itemName: 'log',
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: {
+      vertical: 'staircase-up',
+      upDigX: step.x,
+      upDigY: step.y,
+      upDigZ: step.z,
+      upStepX: step.x,
+      upStepY: step.y,
+      upStepZ: step.z,
+    },
+  }
+  const goals: string[] = []
+  const logs: CapturedLog[] = []
+  let stepGoalCalls = 0
+  let farTargetAttempt = false
+  const routeEvents: string[] = []
+  const firstLegMessages: string[] = []
+  const { bot } = makeStructuralBot(goals, {
+    start: { x: 12.5, y: 30, z: 26.5 },
+    blockAt: () => ({ name: 'air', boundingBox: 'empty' }),
+    goalReach: (goal) => {
+      if (
+        goal.constructor?.name === 'GoalBlock' &&
+        goal.x === step.x &&
+        goal.y === step.y &&
+        goal.z === step.z
+      ) {
+        stepGoalCalls += 1
+        return stepGoalCalls === 1
+      }
+      farTargetAttempt = true
+      routeEvents.push('far-target')
+      return false
+    },
+  })
+  const executor = new Executor(bot, makeCapturingLogger(logs, (line) => {
+    if (line.message.startsWith('SKILL_STEP') && line.message.includes('step=walk_leg') && line.message.includes('count=1')) {
+      firstLegMessages.push(line.message)
+      routeEvents.push('first-leg')
+    }
+  }), {
+    ...defaultExecutorOptions,
+    actuation: 'pathfinder',
+    pathTimeoutMs: 250,
+    pickupPathTimeoutMs: 250,
+    packetStepMs: 0,
+    maxStepsPerWaypoint: 1,
+  })
+  fixtureClaim(executor, candidate)
+  const returnedChunk = await waitFor(() => firstLegMessages.length > 0, 1000)
+  executor.cancelCurrent('already-cleared retrieval step fixture complete')
+  const firstLegIndex = routeEvents.indexOf('first-leg')
+  const farTargetIndex = routeEvents.indexOf('far-target')
+  const firstLegMessage = firstLegMessages[0] ?? null
+  const chunkPhase = firstLegMessage?.includes('phase=retrieved') === true
+  return {
+    pass: returnedChunk && stepGoalCalls >= 1 && chunkPhase && (!farTargetAttempt || firstLegIndex < farTargetIndex),
+    detail: `returnedChunk=${returnedChunk} chunkPhase=${chunkPhase} stepGoalCalls=${stepGoalCalls} farTargetAttempt=${farTargetAttempt} order=[${routeEvents.join(',')}] goals=[${goals.join(',')}]`,
   }
 })
 
