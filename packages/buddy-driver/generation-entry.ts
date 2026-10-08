@@ -1493,6 +1493,60 @@ export function system2FrontierOpportunity(
   }
 }
 
+export type System2FrontierReadiness =
+  | { item: string; description: string; firstCan: string; source?: 'inventory_recipe' }
+  | { item: string; description: string; firstCan: null; source: 'same_world_known_log' }
+
+/**
+ * Evidence used only to reconsider a restored optional System2 recovery row.
+ * A known log is not projected as an executable CAN step or selected goal: it
+ * only proves that the current collect:log frontier has a same-world source
+ * worth showing to a fresh System2 WHAT decision.
+ */
+export function system2FrontierReconsiderationOpportunity(
+  goal: PlannedGoal | null,
+  expectedFrontier: { rungId: string; rungIndex: number },
+  counts: Counts,
+  world: ResidentWorldMemory,
+  durableProgress: DurableLadderProgress | null | undefined,
+  recipes: RecipeIndex,
+  liveDimension: string,
+  liveWorldEpoch: number,
+): System2FrontierReadiness | null {
+  const direct = system2FrontierOpportunity(goal, expectedFrontier, counts, world, durableProgress, recipes)
+  if (direct !== null) {
+    return {
+      item: direct.targetItem,
+      description: direct.description,
+      firstCan: direct.firstStep.type === 'place'
+        ? 'PLACE:crafting_table'
+        : `CRAFT:${direct.firstStep.item}x${direct.firstStep.count}`,
+      source: 'inventory_recipe',
+    }
+  }
+  if (goal?.kind !== 'collect' || goal.targetItem !== 'log') return null
+  const currentFrontier = deriveResumeRung(counts, world, undefined, durableProgress)
+  if (currentFrontier.rungId !== expectedFrontier.rungId || currentFrontier.rungIndex !== expectedFrontier.rungIndex) {
+    return null
+  }
+  const liveDimensionId = normalizeDimensionId(liveDimension)
+  if (liveDimensionId.length === 0) return null
+  const hasSameWorldLog = world.knownResources.some((resource) =>
+    resource.kind === 'log' &&
+    resource.name.endsWith('_log') &&
+    resource.dimension !== undefined &&
+    normalizeDimensionId(resource.dimension) === liveDimensionId &&
+    resource.worldEpoch === liveWorldEpoch,
+  )
+  if (!hasSameWorldLog) return null
+  return {
+    item: goal.targetItem,
+    description: goal.description,
+    firstCan: null,
+    source: 'same_world_known_log',
+  }
+}
+
 /** Stable semantic identity for System2-owned plans; it carries no ladder frontier. */
 export const SYSTEM2_MISSION_PLAN_IDENTITY: Readonly<PlanIdentity> = Object.freeze({
   rungId: 'mission:defeat_ender_dragon',
@@ -1626,7 +1680,7 @@ function reconsiderSystem2RecoverySnapshot(
   const retired: Array<{ id: string; description: string }> = []
   const goals = snapshot.goals.map((goal) => {
     const unfinished = goal.status === 'active' || goal.status === 'pending'
-    if (!unfinished || !isReplaceableRecoveryGoal(goal)) return { ...goal }
+    if (!unfinished || goal.origin === 'human' || !isReplaceableRecoveryGoal(goal)) return { ...goal }
     retired.push({ id: goal.id, description: goal.description })
     return {
       ...goal,
@@ -1643,7 +1697,7 @@ export function selectSystem2LedgerSnapshot(
   derivedSnapshot: GoalQueueSnapshot | null,
   counts: Record<string, number>,
   world: ResidentWorldMemory,
-  readyFrontier: { item: string; description: string; firstCan: string } | null = null,
+  readyFrontier: System2FrontierReadiness | null = null,
 ): {
   source: 'host-snapshot' | 'derived-file'
   snapshot: GoalQueueSnapshot
@@ -1873,7 +1927,7 @@ function restoreLedgerIntoController(
   world: ResidentWorldMemory,
   liveBasis: LedgerBasis,
   log: (event: string, detail?: Record<string, unknown>) => void,
-  readyFrontier: { item: string; description: string; firstCan: string } | null,
+  readyFrontier: System2FrontierReadiness | null,
 ): void {
   let derivedSnapshot: GoalQueueSnapshot | null = null
   if (ledgerPath !== null && existsSync(ledgerPath)) {
@@ -1956,8 +2010,11 @@ function restoreLedgerIntoController(
         next: holder.queue.current?.id ?? 'queue_empty',
         frontier: readyFrontier,
       })
+      const basis = readyFrontier?.source === 'same_world_known_log'
+        ? 'the current collect:log frontier has a same-dimension, same-world-epoch known log source'
+        : `the current mandatory frontier is directly startable; first CAN step=${readyFrontier?.firstCan ?? 'unknown'}`
       holder.recentEvents.push(
-        `restored optional recovery rows ${reconsideredRecovery.map((goal) => goal.id).join(',')} were retired because the current mandatory frontier ${readyFrontier?.description ?? 'unknown'} is directly startable; first CAN step=${readyFrontier?.firstCan ?? 'unknown'}. Reconsider the mission from live inventory and world facts.`,
+        `restored optional recovery rows ${reconsideredRecovery.map((goal) => goal.id).join(',')} were retired because ${basis}. Reconsider the mission from live inventory and world facts.`,
       )
     }
     // The mirror of the reopen above: an unfinished row whose world OUTCOME
@@ -2866,23 +2923,24 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           recipeIndex,
         )
   }
-  const restoreOpportunity = currentFrontierOpportunity()
-  const readyFrontierReconsideration =
-    restoreOpportunity === null
-      ? null
-      : {
-          item: restoreOpportunity.targetItem,
-          description: restoreOpportunity.description,
-          firstCan: restoreOpportunity.firstStep.type === 'place'
-            ? 'PLACE:crafting_table'
-            : `CRAFT:${restoreOpportunity.firstStep.item}x${restoreOpportunity.firstStep.count}`,
-        }
+  const readyFrontierReconsideration = plannerMode === 'deterministic'
+    ? null
+    : system2FrontierReconsiderationOpportunity(
+        frontierGoal,
+        { rungId: ladder.rungId, rungIndex: ladder.rungIndex },
+        inventoryCounts(bot),
+        world,
+        durableLadderProgress,
+        recipeIndex,
+        ctx.worldKey.dimension,
+        ctx.worldKey.worldEpoch,
+      )
   if (readyFrontierReconsideration !== null) {
-    ctx.log('SYSTEM2_FRONTIER_READY_AT_RESTORE', {
+    ctx.log('SYSTEM2_FRONTIER_RECONSIDERATION_AT_RESTORE', {
       frontier: readyFrontierReconsideration,
       rungId: ladder.rungId,
       rungIndex: ladder.rungIndex,
-      source: 'live inventory recipe closure',
+      source: readyFrontierReconsideration.source ?? 'inventory_recipe',
     })
   }
   if (vtrReachProbe) {

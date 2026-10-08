@@ -13,6 +13,7 @@ import {
   selectLedgerSnapshot,
   selectSystem2LedgerSnapshot,
   system2FrontierOpportunity,
+  system2FrontierReconsiderationOpportunity,
   SYSTEM2_MISSION_PLAN_IDENTITY,
 } from './generation-entry.ts'
 import { createRecipeIndex, planNextCraftStep } from '../jev-agent/src/crafting.ts'
@@ -122,6 +123,140 @@ const BUG_LEDGER = ledgerOf([
 ])
 
 const cases: Case[] = [
+  {
+    name: 'same-world known log frontier retires only optional restored recovery and leaves fresh WHAT to System2',
+    expected: true,
+    observed: (() => {
+      const basis: LedgerBasis = {
+        worldKey: '127.0.0.1:26615|minecraft:overworld|1',
+        frontierRungId: 'wood',
+        frontierRungIndex: 0,
+      }
+      const stale = queued({
+        id: 'g1:explore',
+        kind: 'explore',
+        description: 'explore surface terrain',
+        targetItem: null,
+        status: 'active',
+        optionInstanceId: 'explore:surface',
+        optionTemplateId: 'explore:surface',
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      })
+      const food = queued({
+        id: 'g2:collect:food',
+        kind: 'collect',
+        description: 'collect food',
+        targetItem: 'food',
+        status: 'pending',
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      })
+      const saved: GoalQueueSnapshot = {
+        counter: 2,
+        goals: [stale, food],
+        basis,
+        planIdentity: { ...SYSTEM2_MISSION_PLAN_IDENTITY },
+      }
+      const counts = { dirt: 2 }
+      const liveWorld = emptyWorldMemory()
+      liveWorld.knownResources.push({
+        name: 'oak_log',
+        kind: 'log',
+        x: 7216,
+        y: 67,
+        z: 1284,
+        dimension: 'minecraft:overworld',
+        worldEpoch: 1,
+        lastSeenAt: 1_791_444_158_636,
+      })
+      const woodGoal = {
+        kind: 'collect' as const,
+        description: 'collect 3 x log',
+        targetItem: 'log',
+        requiredCount: 3,
+      }
+      const expectedFrontier = { rungId: 'wood', rungIndex: 0 }
+      const readiness = system2FrontierReconsiderationOpportunity(
+        woodGoal,
+        expectedFrontier,
+        counts,
+        liveWorld,
+        null,
+        recipes,
+        'overworld',
+        1,
+      )
+      const wrongDimension = system2FrontierReconsiderationOpportunity(
+        woodGoal,
+        expectedFrontier,
+        counts,
+        liveWorld,
+        null,
+        recipes,
+        'the_nether',
+        1,
+      )
+      const wrongEpoch = system2FrontierReconsiderationOpportunity(
+        woodGoal,
+        expectedFrontier,
+        counts,
+        liveWorld,
+        null,
+        recipes,
+        'overworld',
+        2,
+      )
+      const noSource = system2FrontierReconsiderationOpportunity(
+        woodGoal,
+        expectedFrontier,
+        counts,
+        emptyWorldMemory(),
+        null,
+        recipes,
+        'overworld',
+        1,
+      )
+      const wrongFrontier = system2FrontierReconsiderationOpportunity(
+        woodGoal,
+        { rungId: 'wooden_pickaxe', rungIndex: 2 },
+        counts,
+        liveWorld,
+        null,
+        recipes,
+        'overworld',
+        1,
+      )
+      const selected = selectSystem2LedgerSnapshot(saved, null, counts, liveWorld, readiness)
+      const untouched = selectSystem2LedgerSnapshot(saved, null, counts, liveWorld)
+      const protectedSnapshot: GoalQueueSnapshot = {
+        ...saved,
+        goals: [
+          { ...stale, protected: true },
+          { ...food, origin: 'human' },
+        ],
+      }
+      const protectedSelection = selectSystem2LedgerSnapshot(protectedSnapshot, null, counts, liveWorld, readiness)
+      const queue = new GoalQueue()
+      if (selected !== null) queue.restore(selected.snapshot)
+      return (
+        readiness?.source === 'same_world_known_log' &&
+        readiness.firstCan === null &&
+        readiness.item === 'log' &&
+        wrongDimension === null &&
+        wrongEpoch === null &&
+        noSource === null &&
+        wrongFrontier === null &&
+        selected?.reconsidered.map((goal) => goal.id).join(',') === 'g1:explore,g2:collect:food' &&
+        selected.snapshot.goals.every((goal) => goal.status === 'impossible') &&
+        selected.snapshot.goals.length === saved.goals.length &&
+        untouched?.reconsidered.length === 0 &&
+        untouched?.snapshot.goals.find((goal) => goal.id === 'g1:explore')?.status === 'active' &&
+        protectedSelection?.reconsidered.length === 0 &&
+        protectedSelection.snapshot.goals.find((goal) => goal.id === 'g1:explore')?.status === 'active' &&
+        protectedSelection.snapshot.goals.find((goal) => goal.id === 'g2:collect:food')?.status === 'pending' &&
+        queue.current === null
+      )
+    })(),
+  },
   {
     name: 'restored optional model head gets one System2 reconsideration when the mandatory frontier has an inventory-ready first craft step',
     expected: true,
