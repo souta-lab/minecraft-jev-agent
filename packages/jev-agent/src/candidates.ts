@@ -8434,7 +8434,11 @@ function descendCandidateFromStep(
       id: descendId(best),
       kind: 'DESCEND',
       label: `${best.dir === 'D' ? 'dig straight down' : best.mode === 'down' ? 'dig a staircase step down' : 'tunnel one block forward'} toward ${toward} (${best.dir}), dig (${primary.x},${primary.y},${primary.z}) then stand at (${best.step.x},${best.step.y},${best.step.z})${infestedSuffix}`,
-      targetName: spec.focusItem,
+      // DESCEND's physical target is the primary block cell it clears. Keep
+      // the active focus only in `meta.focusItem`/the route label: using
+      // it as targetName makes semanticTargetRef and the Kernel commitment
+      // describe a stone clearance as (for example) `block:log@stoneCell`.
+      targetName: best.digName ?? null,
       target: primary,
       targetEntityId: null,
       itemName: null,

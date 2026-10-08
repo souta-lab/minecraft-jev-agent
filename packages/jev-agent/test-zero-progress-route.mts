@@ -32,8 +32,9 @@ import { defaultCandidateOptions, entryCandidates, generateCandidates, generateG
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { semanticTargetRef } from './src/jev/semantic-projection.ts'
 import { descentPrimaryCell } from './src/state.ts'
-import type { AgentSignals, DescentOption, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import { NETHER, NETHER_PORTAL, PORTAL_ENTERED_PREDICATE } from './src/netherPortalPlan.ts'
 import {
   cellKey,
@@ -527,6 +528,51 @@ addCase('(d) with no zero-progress memory the descend offer is byte-identical to
       first.meta.mode === 'down' &&
       first.meta.dir === 'E',
     detail: `id=${first?.id ?? 'none'} target=${JSON.stringify(first?.target ?? null)}`,
+  }
+})
+
+addCase('(d2) DESCEND identifies its physical dig block separately from the collect focus', () => {
+  const feet = { x: 10, y: 21, z: 20 }
+  const dig = { x: 10, y: 20, z: 20 }
+  const logTarget: BlockState = {
+    kind: 'log',
+    name: 'oak_log',
+    position: { x: 10, y: 18, z: 20 },
+    distance: 3,
+    diggable: true,
+    inReach: false,
+    hasAdjacentStandable: false,
+    adjacentStandable: null,
+    yield: 'oak_log',
+    harvestTool: null,
+    harvestTier: null,
+  }
+  const base = worldState({
+    position: feet,
+    goalQueue: queueWith(queuedGoal({
+      id: 'g-log',
+      kind: 'collect',
+      description: 'collect log',
+      targetItem: 'log',
+      requiredCount: 8,
+      targetY: null,
+      dimension: null,
+    })),
+    descent: [downStep('D', 0, 0, feet)],
+    signals: signals(),
+  })
+  const candidate = generateCandidates({ ...base, blocks: [logTarget] }).find(
+    (entry) => entry.id === `DESCEND:down:D:b${dig.x}_${dig.y}_${dig.z}`,
+  )
+  if (candidate === undefined) return { pass: false, detail: 'grounded DESCEND toward sensed log was not generated' }
+  const target = semanticTargetRef(candidate)
+  return {
+    pass:
+      candidate.targetName === 'stone' &&
+      candidate.meta.focusItem === 'log' &&
+      candidate.label.includes('toward log') &&
+      target.key === `stone@${dig.x},${dig.y},${dig.z}`,
+    detail: `name=${candidate.targetName === 'stone'} focus=${candidate.meta.focusItem === 'log'} label=${candidate.label.includes('toward log')} semantic=${target.key === `stone@${dig.x},${dig.y},${dig.z}`} targetName=${candidate.targetName} focus=${String(candidate.meta.focusItem)} label=${candidate.label} semantic=${target.key}`,
   }
 })
 
