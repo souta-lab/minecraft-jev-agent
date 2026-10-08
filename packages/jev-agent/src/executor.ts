@@ -1149,14 +1149,16 @@ export interface HopOutcome {
 
 /**
  * The hop outcome and its JUMP_ESCAPE marker, extracted so the pit-escape
- * regression can assert the marker without a live bot. `hopOk` is unchanged:
- * `dy >= 0.75` (the measured 1-block climb) or a landing on the target node.
+ * regression can assert the marker without a live bot. A hop succeeds on a
+ * measured 1-block rise or when it enters the target window; already occupying
+ * that window cannot turn a no-op jump into progress.
  */
 export function evaluateHop(before: Vec3Json, after: Vec3Json, node: Vec3Json): HopOutcome {
   const dy = after.y - before.y
-  const occupiedTarget =
-    Math.hypot(after.x - (node.x + 0.5), after.z - (node.z + 0.5)) <= 1.1 &&
-    Math.abs(after.y - node.y) <= 1
+  const occupiesTarget = (position: Vec3Json): boolean =>
+    Math.hypot(position.x - (node.x + 0.5), position.z - (node.z + 0.5)) <= 1.1 &&
+    Math.abs(position.y - node.y) <= 1
+  const occupiedTarget = !occupiesTarget(before) && occupiesTarget(after)
   const hopOk = dy >= 0.75 || occupiedTarget
   return {
     dy,

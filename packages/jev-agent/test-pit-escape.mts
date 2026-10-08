@@ -213,8 +213,8 @@ addCase('a hop rising dy >= 0.75 emits the JUMP_ESCAPE marker (the released-forw
   // The regression: the released-forward hop ends where it started (dy=0) and
   // this target node is outside the occupied window -> no JUMP_ESCAPE.
   const released = evaluateHop(before, { ...before }, node)
-  // The unchanged `|| occupiedTarget` arm: a hop landing on the node still escapes.
-  const settled = evaluateHop(before, { x: 40.6, y: 8, z: 32.2 }, { x: 40, y: 9, z: 32 })
+  // Entering the target window without vertical rise is still a real arrival.
+  const settled = evaluateHop({ x: 40.6, y: 8, z: 31.2 }, { x: 40.6, y: 8, z: 32.2 }, { x: 40, y: 9, z: 32 })
   const pass =
     escaped &&
     released.dy === 0 &&
@@ -226,6 +226,17 @@ addCase('a hop rising dy >= 0.75 emits the JUMP_ESCAPE marker (the released-forw
     pass,
     detail: `rise=1.12 -> ${hopOutcomes[0]?.escapeMarker ?? 'none'}; released-forward -> ok=${released.hopOk} marker=${released.escapeMarker ?? 'none'}; occupiedTarget -> ok=${settled.hopOk}`,
   }
+})
+
+addCase('a no-rise hop already inside its target window is not a JUMP_ESCAPE', () => {
+  const position = { x: 7181.52, y: 29, z: 1257.65 }
+  const noOp = evaluateHop(position, { ...position }, { x: 7181, y: 29, z: 1257 })
+  const pass =
+    noOp.dy === 0 &&
+    noOp.occupiedTarget === false &&
+    noOp.hopOk === false &&
+    noOp.escapeMarker === null
+  return { pass, detail: `already-in-target -> occupiedTarget=${noOp.occupiedTarget} ok=${noOp.hopOk} marker=${noOp.escapeMarker ?? 'none'}` }
 })
 
 addCase('an unverified MOVE that wandered 1.66m is never an arrival (classifier)', () => {
