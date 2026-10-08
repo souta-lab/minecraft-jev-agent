@@ -21,7 +21,7 @@ If this file conflicts with current V4.1.2 implementation/contracts, repair this
 
 **Typed Decision Plane operating rules are the next-highest runtime constitution after VTR.** Mandatory companion: `docs/architecture/JEV-BEST-PRACTICES-FOR-MINECRAFT.md`. Read it immediately after the V4.1.2 contracts before changing Jev/d1 state projection, candidate compilation, decision epochs, question heads, probability gates, retry/cost behavior, or Minecraft policy that can alter when/why the Typed Decision Plane is called. `docs/architecture/TYPED-DECISION-MODELS.md` defines terminology/backend compatibility; the Jev-best-practices guide defines Minecraft-side operation. If ordinary policy/gameplay code conflicts with that guide without a VTR requirement, repair the code.
 
-**Root gate:** portal gameplay remains lower priority while the Jev-best-practices guide §18 gates A-H are open. Do not resume p24 merely because the provider/backend works. First prove one canonical compact DecisionState, semantic decision-epoch/commitment boundaries, parallel typed-head contract, replay/holdout quality, model-specific calibration, and operational evidence. Token/call savings alone are not proof; verified decision/composition quality must survive.
+**Root gate:** Jev-best-practices §18 gates A-H govern model/decision correctness. The validated architecture checkpoint does **not** require repeating the whole gate before each portal minor. Reopen only the specific gate for fresh evidence of a violated contract (compact DecisionState, epoch/commitment, typed heads, calibration, or operational quality); otherwise pursue first verified Nether entry immediately. Token savings alone never replace verified decision quality.
 
 Never create or revive V4.1.3/V4.2/V5, alternate terminalization, shadow/fallback authority, second SUCCESS owner, selector architecture, architecture tournament, or a parallel semantic authority path.
 
@@ -84,7 +84,7 @@ The following are pre-approved when they serve this repository/campaign:
 - run shell commands, tests, builds, compilers, linters, formatters, migrations, diagnostics, package managers, and repository tooling;
 - install/update/remove project dependencies and ordinary development tooling required by the campaign;
 - update project-local hooks/config, goal-mode state, campaign tooling, local process wiring, and user-level services used by this campaign;
-- start/stop/restart/reload campaign-owned servers, residents, supervisors, observers, test processes, and Devin sessions;
+- start/stop/restart/reload campaign-owned servers, residents, supervisors, observers, and test processes; manage the **existing lead Codex session** without spawning another lead or Devin;
 - create/remove branches/worktrees and perform normal fetch/rebase/cherry-pick/merge/commit/push flows for validated KEEP work;
 - repair stale campaign registry/state/provenance after exact identity checks;
 - run fresh experiments, major rollovers, and same-world minor reloads when required by the experiment contract.
@@ -109,6 +109,15 @@ Never spawn, resume, read, poll, or wait for subagents/sidekicks. The lead agent
 Allowed concurrency is mechanical only: background tests/builds/probes may run while the same lead agent continues useful work. There is one reasoning owner and one mutation owner.
 
 If several tasks are useful, execute them sequentially by **Mission leverage**.
+
+### 3.1 Throughput: one blocker, one implementation, one live result
+
+- A running `/goal`, long analysis, green tests, clean Git, or a minor number is **not** engineering output. For each active blocker, move from one bounded evidence read to either a targeted code/test edit or one discriminating falsification probe **in the same work batch**. After two inspection passes with no new causal distinction, stop searching; write the smallest falsifiable hypothesis, implement/probe it, or resume live play if no code defect is demonstrated.
+- Prefer the next recoverable Mission prerequisite over adjacent cleanup. During recovery debt, measure actual reacquisition (e.g. stone -> iron -> tools), not more route-mining, status refreshes, or documentation. No new minor solely to re-read a frozen body.
+- Batch `focused regression -> type check -> commit/push -> source-bound reload -> first meaningful live outcome`. Do not split a known small fix into separate analysis, test, provenance, and reporting turns. Unrelated complete suites and infrastructure audits wait until a decisive blocker requires them.
+- An active, healthy, source-matched resident executing verified goal/route progress needs **no operator freeze** to produce a checkpoint. Observe non-invasively while doing useful engineering. Do not interrupt an in-flight Skill merely to close a minor or capture tidy evidence.
+- Treat control `FREEZE` / `LEASE_REVOKED` / `cancelled` as **operator lifecycle effects**, not evidence of natural path failure or a reason to inflate failed-action memory. If the runtime counts those as mechanical failures, repair that accounting defect rather than repeating the experiment.
+- Keep one lead and one code-edit owner per file. Never use watchdogs or second agents to compensate for slow progress.
 
 ## 4. Mission scoreboard: capability only counts when it converts
 
@@ -145,6 +154,8 @@ After **3 consecutive `LOCAL_ONLY` KEEP minors**, conversion failure itself beco
 While recovery debt is open, default work is re-attainment. A code change must either directly improve the current recovery path or be required to make that path's evidence trustworthy. Log dedupe, fixture polish, broad refactor, and unrelated correctness cleanup are `E DEFER` unless they are themselves blocking diagnosis/provenance.
 
 **Recovery trajectory is a semantic invariant, not a count of successful motions.** During re-attainment or prerequisite acquisition, repeated movement/world-shaping must have an evidence-backed relation to the active missing prerequisite: approach a sensed/remembered source, acquire a named capability, escape toward a searchable region, or measurably reduce the prerequisite's reachability gap. A broken block, changed body cell, or locally verified transition is not enough. **Three verified transitions with zero target-resource/frontier delta and no improved prerequisite reachability are `TRAJECTORY_CHURN`**, even when candidate ids/cells differ or the runtime calls them `body`/`search` progress. Verified mining alone must not erase that causal no-progress history.
+
+**Equivalent-route failure memory crosses candidate kinds.** `MOVE`, `RETRIEVE`, `ASCEND`, and `PICKUP` aimed at the same physical stand/goal through the same blocked first leg are one reachability hypothesis, not four fresh samples. Key the fingerprint on world/geometry, blocking cell/first leg, goal reachability and observed progress, not action ID alone. A genuinely changed route/terrain/support or new information permits a new attempt; a new label alone does not. After one clear refusal and one unchanged no-progress retry, change the affordance or repair the shared planner boundary instead of selecting a nominally different action for the same wall.
 
 **Starving-body habitat ascent has a separate route-progress boundary.** `FOOD_SOURCE_NONE ... link=no_route_to_sensed_source` describes the currently sensed direct food source and the missing route to it; it does not refuse an independently grounded `foodHabitat` ascent toward `animal-habitat:y>=63`. Keep those facts distinct: prospective habitat is not a sensed edible source, and neither a cleared block nor altitude is food or Mission success. In a bounded ascent window, count route progress only from source-bound evidence: verified removal of a candidate tagged `approachLeg=food_habitat_clearance` for that same habitat target, observed body Y rising with the remaining height gap shrinking, or a fresh reachable stand/route opening that reduces the gap. Do not freeze merely because food remains 0 or because three actions elapsed while one of those measures is improving. Continue until the body reaches the grounded habitat boundary or actual food/health milestone; then re-ground the scene. Freeze earlier on a decisive route refusal, two identical unchanged mechanical failures, three consecutive transitions without any route-progress measure, new danger/damage, death/resource loss, or a materially changed blocker. Record route progress separately from food acquisition and Mission delta.
 
@@ -188,7 +199,7 @@ Use `pN+1` for materially new experiment premises, fresh-world requirements, bro
 
 Use `pN.x` for **one causal production defect** while preserving the same major world/server/player/connection/durable state whenever possible.
 
-A minor ends when the hypothesis is decided, not when a timer expires. **10–15 minutes is a hard ceiling for unchanged-fingerprint dwell, never a target.**
+A minor ends when the hypothesis is decided, not when a timer expires. **10–15 minutes is a hard ceiling for unchanged-fingerprint dwell, never a target.** This is an anti-stall ceiling, **not** an instruction to freeze a progressing live run or to spend the entire interval gathering evidence.
 
 Exit rules:
 - one decisive typed mechanical/VERIFY/authority failure is enough;
@@ -196,6 +207,8 @@ Exit rules:
 - three unchanged `WAIT`/`ESCALATE`/System2/no-progress cycles on one state fingerprint are churn; **there is no fourth**;
 - once the next defect is exposed, close/stamp the current minor and open the next immediately;
 - once a narrow fix path is known, drive focused proof + exact commit + fresh live evidence in the same work batch when mechanically possible.
+- wait for an admitted Skill to settle naturally before a discretionary freeze. A decisive danger, integrity failure, death, or genuinely wedged action can require immediate termination; ordinary proof collection cannot.
+- keep bookkeeping proportional: the required short predeclaration before mutation, one source-bound live outcome and one closure at a decided boundary are sufficient. Do not emit multiple overlapping reconciliation/proof/status artifacts or reread unchanged historical evidence. Reconcile registry once when drift is observed, not as a repeated development activity.
 
 A guard that only reduces reachable state is `SAFETY_GUARD/PARTIAL`, not solved capability.
 
@@ -257,7 +270,7 @@ Canonical reload:
 
 Require exact new `sourceSha`/hash/generation evidence and `reconnects=0`. Restart HOST only for real host/contract/schema need or unhealthy/dead resident.
 
-Fresh code requires fresh evidence. Same-SHA restart may retain durable failure memory; older-SHA source-dependent retirement/failure may not suppress evaluation of changed code.
+Fresh code requires fresh evidence. Same-SHA restart may retain durable failure memory; older-SHA source-dependent retirement/failure may not suppress evaluation of changed code. Staged code while frozen is not running gameplay. When the clean HEAD is already the active runtime source, continue the same generation instead of rebuilding or reloading needlessly.
 
 Provenance binds major `runId`, `activeMinor`/`segmentId`, `generationSourceSha`, build hash, generation id, world/server identity, runtime PIDs, reload/restart boundary, reconnect count, and `hostBootSha` separately from generation SHA.
 
@@ -294,11 +307,11 @@ Treat the engineering toolchain itself as a bounded resource. Inspection command
 
 A terminal/tool UI that still says `Running` is **not evidence that useful work is running**. If the OS child for a normally short command is already gone, or a normally sub-minute command has had no child/output/state change for several minutes, classify it as `DEVIN_TOOL_STALE` rather than waiting. If control is available, cancel that stale tool **once** and resume from durable evidence; do not rerun the whole discovery batch just to recreate context. Legitimate long tests/runs are distinguished by a live child process, CPU/output/progress, or an explicit background contract.
 
-An explicit model/API usage limit is `MODEL_RATE_LIMITED`, **not** `DEVIN_TOOL_STALE`. Preserve WIP and the live Minecraft campaign, record the provider's reset/retry time when supplied, and back off until that boundary. Do not repeatedly restart Devin during the same rate-limit window and do not silently switch to a different/paid model merely to bypass the limit. When the boundary passes, retry the existing session once; only use ordinary stale-tool recovery if the post-limit session itself becomes stale.
+An explicit model/API usage limit is `MODEL_RATE_LIMITED`, **not** `DEVIN_TOOL_STALE`. Preserve WIP and the live Minecraft campaign, record the provider's reset/retry time when supplied, and back off until that boundary. Do not repeatedly restart the existing Codex session during the same rate-limit window and do not silently switch to a different/paid model merely to bypass the limit. When the boundary passes, retry the existing session once; only use ordinary stale-tool recovery if the post-limit session itself becomes stale.
 
-A watchdog restart is recovery, not success. If **2 `DEVIN_TOOL_STALE` recoveries occur within 60 minutes**, classify the engineering-tool lane itself as an active infra incident before launching another similar command shape. Switch to smaller direct file reads/searches or one bounded single-purpose command; avoid the compound pipeline/streaming pattern that just stalled, record the stale command class in the handoff, and return to normal tooling only after a clean bounded operation. Do not let repeated watchdog restarts become the normal execution loop.
+**External watchdogs are permanently prohibited.** Never start, relaunch, schedule, or install a watchdog service/script for tmux, Codex, or Minecraft. Keep the existing single Codex/unsnooze process; use direct bounded tool recovery without a watchdog. After two tool-stale incidents in 60 minutes, use smaller reads/commands and change the command shape instead of repeating session restarts.
 
-A Devin/session restart is an infrastructure boundary, not permission to discard WIP or restart reasoning from zero. Preserve dirty files, read `git diff` before editing, and continue the same causal batch unless fresh live truth invalidates it. Never reset or overwrite surviving WIP merely because the previous UI died.
+A Codex/session restart is an infrastructure boundary, not permission to discard WIP or restart reasoning from zero. Preserve dirty files, read `git diff` before editing, and continue the same causal batch unless fresh live truth invalidates it. Never reset or overwrite surviving WIP merely because the previous UI died.
 
 
 ### 9.2 Model/provider availability is a bounded infrastructure episode
@@ -311,7 +324,7 @@ A provider/model switch is allowed only through the typed-model compatibility pr
 
 For paid or credit-backed APIs, record model identity plus returned usage/cost metadata when available and keep retries bounded. Availability recovery is complete only after one focused typed-model probe succeeds and the first production Jev decision records the intended provider/model/source provenance.
 
-Maintain `/home/s0u7a/.config/devin/mc-ai-handoff.md` as a **non-authoritative crash note** containing: current run + exact source, verified high-water/current debt, current causal hypothesis, dirty files, last completed proof step, and the next concrete action. Update it when a causal defect becomes decided, before a naturally long/risky tool step, and after commit/reload. On restart read it after git status, then reconcile against live truth. Live process/world/source evidence always overrides the note.
+Maintain `/home/s0u7a/.config/devin/mc-ai-handoff.md` as a **non-authoritative legacy crash note** (do not launch Devin) containing: current run + exact source, verified high-water/current debt, current causal hypothesis, dirty files, last completed proof step, and the next concrete action. Update it when a causal defect becomes decided, before a naturally long/risky tool step, and after commit/reload. On restart read it after git status, then reconcile against live truth. Live process/world/source evidence always overrides the note.
 
 ## 10. Kernel/resource/mutation invariants
 
