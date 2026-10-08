@@ -16,7 +16,7 @@ import { DESCEND_SCAFFOLD_BLOCK_META, DESCEND_SCAFFOLD_PLACE_META } from './desc
 import type { Vec3Json, WorldState } from './state.ts'
 import { bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyNeedsBreathEscape, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey, waterRouteBreathOk } from './state.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
-import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
+import { ENV_LAVA_PROXIMITY, envContactDamageBlock, envHazardProximityDenied } from './envHazard.ts'
 import { isVerifiedWallEntry } from './wallEntry.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 import { containerObservationAt, observedItemCount } from './containerAccess.ts'
@@ -290,7 +290,10 @@ function guardMine(candidate: Candidate, state: WorldState, context: GuardContex
         `needs ${candidate.toolName ?? 'a tool'} but the inventory has none (items: ${describeInventory(state)})`,
       )
     }
-    const hazard = nearestHazardTo(state, target)
+    // MINE is a stationary dig, not a locomotion step. Contact-damage flora
+    // (berry bushes/cacti) only hurts when the body's own cell intersects it;
+    // treating a neighbouring bush as lava made a grounded log dig impossible.
+    const hazard = nearestHazardTo(state, target, true)
     if (hazard !== null) {
       return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the ceiling block`)
     }
@@ -324,7 +327,9 @@ function guardMine(candidate: Candidate, state: WorldState, context: GuardContex
     )
   }
 
-  const hazard = nearestHazardTo(state, target)
+  // Keep the lava/fire proximity safety check, but don't extend a contact
+  // flora block's own-cell collision hazard to an adjacent MINE target.
+  const hazard = nearestHazardTo(state, target, true)
   if (hazard !== null) {
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the target block`)
   }
@@ -1357,11 +1362,11 @@ function hasTool(state: WorldState, toolName: Candidate['toolName']): boolean {
   )
 }
 
-function nearestHazardTo(state: WorldState, position: Vec3Json) {
+function nearestHazardTo(state: WorldState, position: Vec3Json, ignoreContactFlora = false) {
   let nearest = null
   let nearestDistance = LAVA_PROXIMITY
   for (const block of state.blocks) {
-    if (block.kind !== 'hazard') continue
+    if (block.kind !== 'hazard' || (ignoreContactFlora && envContactDamageBlock(block.name))) continue
     const d = distance(block.position, position)
     if (d <= nearestDistance) {
       nearestDistance = d

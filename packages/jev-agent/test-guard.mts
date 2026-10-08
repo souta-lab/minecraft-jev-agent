@@ -47,6 +47,21 @@ function logBlock(position: Vec3Json, distance: number, inReach: boolean, hasAdj
   }
 }
 
+function hazardBlock(name: string, position: Vec3Json): BlockState {
+  return {
+    kind: 'hazard',
+    name,
+    position,
+    distance: 1,
+    diggable: false,
+    inReach: false,
+    hasAdjacentStandable: false,
+    adjacentStandable: null,
+    yield: null,
+    harvestTool: null,
+  }
+}
+
 function state(overrides: {
   self: Vec3Json
   blocks: BlockState[]
@@ -336,6 +351,43 @@ addCase('rejects LAVA_RISK when lava is adjacent', () => {
   return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
 })
 
+addCase('allows a grounded log MINE adjacent to contact-damage flora', () => {
+  const fixture = state({
+    self: { x: 0, y: 64, z: 0 },
+    blocks: [
+      logBlock(IN_REACH_LOG, 1.9, true, true),
+      hazardBlock('sweet_berry_bush', { x: 2, y: 64, z: 0 }),
+    ],
+  })
+  const chunk = candidate({
+    id: 'MINE:b1_64_0',
+    kind: 'MINE',
+    targetName: 'oak_log',
+    target: IN_REACH_LOG,
+    inReach: true,
+    hasStandableAdjacent: true,
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
+addCase('keeps a MOVE into a contact-damage flora cell guarded', () => {
+  const bush = { x: 1, y: 64, z: 0 }
+  const fixture = state({
+    self: { x: 0, y: 64, z: 0 },
+    blocks: [hazardBlock('sweet_berry_bush', bush)],
+    standable: [bush],
+  })
+  const chunk = candidate({
+    id: 'MOVE:p1_64_0',
+    kind: 'MOVE',
+    target: bush,
+    inReach: false,
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
+})
+
 // --- CONFLICT_IN_FLIGHT: a second dig while one is already owned
 addCase('rejects CONFLICT_IN_FLIGHT while another mine is running', () => {
   const fixture = state({ self: { x: 0, y: 64, z: 0 }, blocks: [logBlock(IN_REACH_LOG, 1.9, true, true)] })
@@ -608,6 +660,7 @@ const expected: Record<string, GuardCode | null> = {
   'accepts a stale WAIT (no coordinates to decay)': null,
   'rejects NO_SUPPORT when there is no walk-up access': 'NO_SUPPORT',
   'rejects LAVA_RISK when lava is adjacent': 'LAVA_RISK',
+  'keeps a MOVE into a contact-damage flora cell guarded': 'LAVA_RISK',
   'rejects CONFLICT_IN_FLIGHT while another mine is running': 'CONFLICT_IN_FLIGHT',
   'accepts a log-anchored MOVE to its walk-up spot': null,
   'accepts a vertical-plan MOVE when the horizontal path probe refuses': null,
