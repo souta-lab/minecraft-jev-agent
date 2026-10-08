@@ -3278,10 +3278,12 @@ export function formatExploreRouteBlocked(blocked: ExploreRouteBlocked): string 
  *   - `recurrent`     the only remembered safe continuation has oscillated; it
  *                     is retired and the policy boundary receives the no-frontier fact.
  *   - `direction_mismatch` the active row names the surface/up direction and the
- *                     body already sits below the surface band, so every
- *                     down-step digs AWAY from the option's own search space
- *                     (the up-route belongs to the sealed-pocket escape and
- *                     surface-ascent arms instead).
+ *                     body already sits below the surface band, or a sensed
+ *                     matching source is above the body and no safe down-step
+ *                     reduces grid-cell distance to it. In either case every
+ *                     remaining down-step digs AWAY from the option's own
+ *                     search space (the up-route belongs to the sealed-pocket
+ *                     escape and surface-ascent arms instead).
  *   - `descent_budget_exhausted` the zero-delta descent latch armed: at least
  *                     `DESCEND_NO_PROGRESS_LIMIT` completed descends removed
  *                     blocks without any resource/frontier delta, which proves
@@ -8624,8 +8626,9 @@ function columnDescentCandidates(
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
+  const surfaceDirected = optionIsSurfaceDirected(state.goalQueue?.current ?? null, focusItem)
   if (
-    optionIsSurfaceDirected(state.goalQueue?.current ?? null, focusItem) &&
+    surfaceDirected &&
     state.self.position.y < ANIMAL_HABITAT_SEA_LEVEL
   ) {
     return { candidates: [], refusal: { reason: 'direction_mismatch', cell: feet } }
@@ -8637,7 +8640,7 @@ function columnDescentCandidates(
   if (state.signals.descendLimitReached === true) {
     return { candidates: [], refusal: { reason: 'descent_budget_exhausted', cell: feet } }
   }
-  const safeDown = (state.descent ?? []).filter(
+  let safeDown = (state.descent ?? []).filter(
     (step) =>
       step.mode === 'down' &&
       step.safe &&
@@ -8646,6 +8649,25 @@ function columnDescentCandidates(
   )
   if (safeDown.length === 0) {
     return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
+  }
+  // A named surface resource above a stranded body is a directional bearing,
+  // not merely a label for whichever down-step is mechanically safe. Candidate
+  // geometry is cell-based, so compare the floored feet cell with the sensed
+  // source and retain only steps that strictly reduce that same grid distance.
+  // This preserves a grounded horizontal/down approach when it really closes
+  // the gap, while refusing the repeated "toward log" descents measured live in
+  // portal-p27.57 when every sensed log stand was independently blacklisted.
+  const current = state.goalQueue?.current ?? null
+  const sensedSurfaceSource =
+    surfaceDirected && current?.kind === 'collect' && focusItem !== null
+      ? nearestResource(state, focusItem)
+      : null
+  if (sensedSurfaceSource !== null && sensedSurfaceSource.position.y > feet.y) {
+    const sourceDistance = distance(feet, sensedSurfaceSource.position)
+    safeDown = safeDown.filter((step) => distance(step.step, sensedSurfaceSource.position) < sourceDistance)
+    if (safeDown.length === 0) {
+      return { candidates: [], refusal: { reason: 'direction_mismatch', cell: feet } }
+    }
   }
   const fixedDir = state.signals.digDir ?? null
   const fixedMode = state.signals.digMode ?? null

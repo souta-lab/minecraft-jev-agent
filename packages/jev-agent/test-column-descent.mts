@@ -18,7 +18,7 @@ import { clearanceMineReground, defaultCandidateOptions, formatColumnDescentRefu
 import type { Candidate } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
-import type { AgentSignals, DescentOption, GoalState, InventoryState, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 
 interface Case {
   name: string
@@ -934,6 +934,92 @@ addCase('(p24) collect:log ABOVE the surface band keeps the descent (down moves 
   return {
     pass,
     detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} column=${columnDescentCandidates(grounded.candidates).length}`,
+  }
+})
+
+// --- portal-p27.58: a named sensed source is the direction bearing for a
+// surface-directed collect route. Live gen-muza6eox (source 4fb7724c) offered
+// five safe column descents labeled "toward log" while every sensed log stood
+// above the body; D1 selected zero-log-delta descents. Keep only steps that
+// actually reduce distance to the sensed matching source. ------------------
+
+const UPPER_FEET: Vec3Json = { x: 23.5, y: 65, z: 8.5 }
+const UPPER_CELL: Vec3Json = { x: 23, y: 65, z: 8 }
+
+function sensedLog(position: Vec3Json): BlockState {
+  return {
+    kind: 'log',
+    name: 'oak_log',
+    position,
+    distance: Math.hypot(position.x - UPPER_FEET.x, position.y - (UPPER_FEET.y + 1.62), position.z - UPPER_FEET.z),
+    diggable: true,
+    inReach: false,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: position.x, y: position.y + 1, z: position.z },
+    yield: 'oak_log',
+  }
+}
+
+function upperLogState(log: BlockState): WorldState {
+  const logRow = queued({
+    id: 'g58:collect:log',
+    kind: 'collect',
+    description: 'collect 1 x log',
+    targetItem: 'log',
+    requiredCount: 1,
+  })
+  const state = worldState({
+    position: UPPER_FEET,
+    standable: [UPPER_CELL],
+    descent: openGroundDescent(UPPER_FEET),
+    goalQueue: queueWith(logRow),
+  })
+  state.self = { ...state.self, health: 20, food: 20 }
+  state.blocks = [log]
+  return state
+}
+
+function upperLogOptions(log: BlockState) {
+  const blockedStand = log.adjacentStandable
+  return {
+    ...defaultCandidateOptions,
+    blacklistedMoveTargets: (_dimension: string, position: Vec3Json) =>
+      blockedStand !== null &&
+      Math.floor(position.x) === Math.floor(blockedStand.x) &&
+      Math.floor(position.y) === Math.floor(blockedStand.y) &&
+      Math.floor(position.z) === Math.floor(blockedStand.z),
+  }
+}
+
+addCase('(p27.58) an above-body sensed log refuses column descents that retreat from it', () => {
+  const log = sensedLog({ x: 23, y: 69, z: 8 })
+  const state = upperLogState(log)
+  const grounded = generateGroundedCandidates(state, upperLogOptions(log))
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal?.reason === 'direction_mismatch' &&
+    grounded.candidates.every((candidate) => candidate.kind !== 'MOVE') &&
+    columnDescentCandidates(grounded.candidates).length === 0
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} column=[${columnDescentCandidates(grounded.candidates).map((c) => c.id).join(',')}] set=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('(p27.58) a safe down-step remains when it reduces distance to the above-body log', () => {
+  const log = sensedLog({ x: 30, y: 70, z: 8 })
+  const state = upperLogState(log)
+  const grounded = generateGroundedCandidates(state, upperLogOptions(log))
+  const approachingEast = columnDescentCandidates(grounded.candidates).some(
+    (candidate) => candidate.meta.dir === 'E' && candidate.meta.mode === 'down',
+  )
+  const pass =
+    strandedOnColumn(state) &&
+    grounded.columnDescentRefusal === null &&
+    approachingEast
+  return {
+    pass,
+    detail: `refusal=${grounded.columnDescentRefusal?.reason ?? 'none'} east=${approachingEast} column=[${columnDescentCandidates(grounded.candidates).map((c) => c.id).join(',')}]`,
   }
 })
 
