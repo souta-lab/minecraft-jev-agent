@@ -3929,8 +3929,8 @@ const DEFAULT_PLACE_SPOT_RETRY_LIMIT = 2
  * candidate-generation cap, not a physical one.
  */
 const DEFAULT_FOOD_HUNT_RANGE = 24
-/** Block within this horizontal distance of the bot counts as pickup-adjacent. */
-const PICKUP_MINE_HORIZONTAL = 2.75
+/** A block drop inside this horizontal distance can be collected without a post-dig walk. */
+const PICKUP_MINE_HORIZONTAL = 1.3
 /** Vertical band (relative to the feet) in which a drop still lands in reach. */
 const PICKUP_MINE_VERTICAL = 1.5
 
@@ -6608,8 +6608,14 @@ function mineCandidates(
     const spotHorizontal =
       spot === null ? Number.POSITIVE_INFINITY : Math.hypot(spot.x + 0.5 - self.x, spot.z + 0.5 - self.z)
     const atSpot = spot !== null && spotHorizontal <= 0.9 && Math.abs(spot.y - self.y) <= 1.5
-    const pickupSafe =
-      (horizontal <= PICKUP_MINE_HORIZONTAL && vertical <= PICKUP_MINE_VERTICAL) || atSpot
+    // Interaction reach and a nearby interaction stand do not prove the drop
+    // can reach inventory. In particular, `atSpot` may be a lower floor beside
+    // an overhead canopy log: mining is legal, but its drop is outside the
+    // pickup volume and the post-dig collector then tries an unsupported jump.
+    // Keep collect MINEs inside the bounded pickup envelope; otherwise the
+    // ordinary MOVE-to-stand route lets the Typed Decision Plane choose an
+    // approach before committing to harvest.
+    const pickupSafe = horizontal <= PICKUP_MINE_HORIZONTAL && vertical <= PICKUP_MINE_VERTICAL
 
     // In reach, visible AND pickup-adjacent: mine it now. Anything farther would
     // drop the item outside the pickup volume, so it becomes a MOVE instead.

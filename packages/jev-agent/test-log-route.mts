@@ -306,8 +306,8 @@ addCase('after a known retrieve retry budget is spent, exploration still approac
 
 // (3) a sensed log in reach -> mine_sensed, no exploration on top -----------------
 addCase('a sensed log in reach presents mine_sensed', () => {
-  const feet: Vec3Json = { x: 0, y: 60, z: 0 }
-  const sensed = logBlock({ x: 1, y: 60, z: 0 }, { inReach: true, visible: true, distance: 1, adjacentStandable: feet })
+  const feet: Vec3Json = { x: 0.5, y: 60, z: 0.5 }
+  const sensed = logBlock({ x: 1, y: 60, z: 0 }, { inReach: true, visible: true, distance: 1, adjacentStandable: { x: 0, y: 60, z: 0 } })
   const state = worldState({
     position: feet,
     standable: [feet, { x: 3, y: 60, z: 0 }],
@@ -327,6 +327,49 @@ addCase('a sensed log in reach presents mine_sensed', () => {
   return {
     pass,
     detail: `route=${route === null ? 'none' : formatLogRoute(route)} candidates=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
+addCase('an in-reach log outside the pickup envelope routes to its sensed stand before MINE', () => {
+  const feet: Vec3Json = { x: 0.5, y: 60, z: 0.5 }
+  const stand: Vec3Json = { x: 1, y: 60, z: 0 }
+  const sensed = logBlock(
+    { x: 2, y: 60, z: 0 },
+    { inReach: true, visible: true, distance: 2.1, adjacentStandable: stand, hasAdjacentStandable: true },
+  )
+  const state = worldState({
+    position: feet,
+    standable: [feet, stand],
+    blocks: [sensed],
+    goalQueue: queueWith(queuedGoal({})),
+  })
+  const grounded = generateGroundedCandidates(state, { ...options(), moveMinDistance: 0 })
+  const mineId = `MINE:${blockId('b', sensed.position)}`
+  const move = grounded.candidates.find((candidate) => candidate.kind === 'MOVE' && candidate.target !== null &&
+    candidate.target.x === stand.x && candidate.target.y === stand.y && candidate.target.z === stand.z)
+  return {
+    pass: grounded.candidates.every((candidate) => candidate.id !== mineId) && move !== undefined,
+    detail: `mine=${grounded.candidates.some((candidate) => candidate.id === mineId)} move=${move?.id ?? 'none'} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+  }
+})
+
+addCase('being at an interaction stand does not make a three-block-high log drop pickup-safe', () => {
+  const feet: Vec3Json = { x: 0.5, y: 60, z: 0.5 }
+  const sensed = logBlock(
+    { x: 0, y: 63, z: 1 },
+    { inReach: true, visible: true, distance: 3.2, adjacentStandable: { x: 0, y: 60, z: 0 }, hasAdjacentStandable: true },
+  )
+  const state = worldState({
+    position: feet,
+    standable: [feet],
+    blocks: [sensed],
+    goalQueue: queueWith(queuedGoal({})),
+  })
+  const grounded = generateGroundedCandidates(state, options())
+  const mineId = `MINE:${blockId('b', sensed.position)}`
+  return {
+    pass: grounded.candidates.every((candidate) => candidate.id !== mineId),
+    detail: `mine=${grounded.candidates.some((candidate) => candidate.id === mineId)} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
   }
 })
 

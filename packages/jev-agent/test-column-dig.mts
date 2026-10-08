@@ -216,8 +216,9 @@ function columnDigs(candidates: readonly { id: string; meta: Record<string, unkn
     digs.filter((id) => id === 'MINE:b4_69_17').length === 1 && !digs.includes('MINE:b4_70_17') && !digs.includes('MINE:b4_72_17'),
     `digs=[${digs.join(',')}]`,
   )
-  // Progress: mining the base removes it, the drop falls to the landing, and the
-  // body steps onto the landing. The next tick still holds a log route upward.
+  // Progress: after the base is removed the body reaches the landing. A higher
+  // column cell is outside the pickup volume from there, so the next safe step is
+  // a MOVE to its sensed stand before the next inventory-producing MINE.
   const after = generateGroundedCandidates(
     liveWorld({
       position: LIVE_LANDING,
@@ -227,10 +228,10 @@ function columnDigs(candidates: readonly { id: string; meta: Record<string, unkn
     options(),
   )
   const progressed = after.candidates.some(
-    (candidate) => candidate.kind === 'MINE' && candidate.target !== null && candidate.target.y >= 69,
+    (candidate) => candidate.kind === 'MOVE' && candidate.target !== null && candidate.target.y >= 69,
   )
   await check(
-    '(a) progress continues: after the base is mined the next column cell is offered',
+    '(a) progress continues: the higher column cell is approached before its drop can be collected',
     progressed,
     `after=[${after.candidates.map((c) => c.id).join(',')}]`,
   )

@@ -458,17 +458,16 @@ addCase('the probe carries the bounded branch claim and a stable id', () => {
   return { pass, detail: `id=${probe?.id ?? 'none'} target=${JSON.stringify(probe?.target)} label=${probe?.label ?? ''}` }
 })
 
-addCase('a producer behind a wall that is already pickup-adjacent gets the wall dig beside the MINE', () => {
-  // occluded case: the producer is 2 blocks east with the solid wall between, so
-  // the ordinary MINE branch (which has no `visible` fact for name-scanned ores)
-  // offers a dig through rock. The wall probe is the grounded route - one dig
-  // exposes the producer into the cell the body then stands in - and both offers
-  // stay on the table: code enumerates CAN, Jev owns WHICH.
+addCase('a producer behind a wall outside the pickup volume gets the wall dig without a false MINE', () => {
+  // The producer is 2 blocks east with the solid wall between. Its block is
+  // interactable, but its drop cannot enter the pickup volume from this body
+  // position. The wall probe is the grounded route and remains alongside the
+  // descend step; Jev still owns WHICH.
   const state = world({ focusItem: 'raw_iron', blocks: [ore({ x: 30, y: 59, z: 33 }, { inReach: true })] })
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
   const probe = prospects(grounded.candidates)[0]
   const pass =
-    mines(grounded.candidates).length === 1 &&
+    mines(grounded.candidates).length === 0 &&
     probe?.id === 'PROSPECT:level:E:b29_59_33' &&
     probe.meta.prospectAlong === 2 &&
     probe.meta.prospectExposure === 'exposed_by_this_dig'
@@ -478,10 +477,10 @@ addCase('a producer behind a wall that is already pickup-adjacent gets the wall 
   }
 })
 
-addCase('a lower-target collect row keeps the prospect beside an in-range MINE', () => {
+addCase('a lower-target collect row keeps the prospect and withholds a remote MINE', () => {
   // The acquisition row can be `collect` with a lower grounded target, not only
-  // an explicit `descend`. A sibling MINE is a real route, but must not make the
-  // prospect's clearance-tagged DESCEND disappear during candidate pruning.
+  // an explicit `descend`. An interaction-reachable producer outside the pickup
+  // volume is not yet a MINE; its prospect must remain available.
   const state = world({
     focusItem: 'raw_iron',
     blocks: [ore({ x: 30, y: 59, z: 33 }, { inReach: true })],
@@ -490,7 +489,7 @@ addCase('a lower-target collect row keeps the prospect beside an in-range MINE',
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
   const probe = prospects(grounded.candidates)[0]
   const pass =
-    mines(grounded.candidates).length === 1 &&
+    mines(grounded.candidates).length === 0 &&
     probe?.id === 'PROSPECT:level:E:b29_59_33' &&
     probe.meta[PROSPECT_META] === true &&
     probe.meta.prospectExposure === 'exposed_by_this_dig'
