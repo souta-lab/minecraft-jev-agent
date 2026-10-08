@@ -139,6 +139,30 @@ test('explicit singleton refusal reaches abandonment with low beta, while ordina
   } finally { f.dispose() }
 })
 
+test('controller stop invalidates an in-flight semantic decision before a late provider result can authorize', () => {
+  const f = fixture()
+  try {
+    f.host.running = true
+    const pending = f.host.decisionEpochs.begin({
+      projectionHash: 'pending-provider-answer',
+      candidateIdentities: ['candidate:retrieve:known-log'],
+      dimension: 'overworld',
+      worldEpoch: 1,
+      nowMs: 1,
+    })
+
+    f.controller.stop()
+
+    assert.equal(f.host.running, false)
+    assert.deepEqual(f.host.decisionEpochs.accept(pending.epoch), {
+      accepted: false,
+      epoch: pending.epoch,
+      reason: 'none',
+    }, 'a provider result returning after stop has no active decision epoch')
+    assert.equal(f.host.decisionEpochs.lastClosed?.closeReason, 'lease_revoked')
+  } finally { f.dispose() }
+})
+
 test('full tick records DECLINE without unoffered WAIT, guard disappearance, executor claim or success', async () => {
   const f = fixture()
   try {

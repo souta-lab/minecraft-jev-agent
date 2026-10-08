@@ -5155,6 +5155,20 @@ export class JevController {
     }
     this.system2?.cancelPending?.(`controller-finished:${stopped}`)
     this.running = false
+    // A provider call may still be in flight when HOST freezes/quiesces this
+    // controller. Revoke its semantic authority at the same boundary as the
+    // controller lifecycle: otherwise a delayed result can be accepted after
+    // the actuation lease has already been revoked, then be misreported as a
+    // mechanical failure and poison route memory.
+    const invalidatedDecision = this.decisionEpochs?.invalidate('lease_revoked') ?? null
+    if (invalidatedDecision !== null) {
+      this.logger.info(
+        'policy',
+        formatStaleResultDropped(invalidatedDecision.epoch, null, 'controller_stopped'),
+        { stopped, projectionHash: invalidatedDecision.projectionHash },
+        this.tickCounter,
+      )
+    }
     this.saveLedger()
     this.scheduler.stop()
     this.clearDecisionTimer()
