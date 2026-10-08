@@ -139,6 +139,7 @@ function makeHarness(planId: string | null, limit: number): Harness {
     options: { betaAuthority: true },
     betaAbandonDeferral: new BetaAbandonDeferral(limit),
     betaAbandonPlanId: planId,
+    lastBetaAbandonProgressOutcome: null,
     // This fixture's productive body outcomes represent observed efficient
     // locomotion. Idle/unobserved body evidence is covered in
     // test-locomotion-progress.mts and does not hold the beta deferral open.
@@ -236,9 +237,11 @@ addCase('(a) no abandon request is not a deferred streak', () => {
 
 // --- (b) a genuinely productive in-flight action keeps its deferral ------------
 
-addCase('(b) verified body progress defers the abandon indefinitely', () => {
+addCase('(b) each fresh verified body outcome grants one deferral', () => {
   const harness = makeHarness(GOAL, 3)
-  const votes = Array.from({ length: 10 }, () => harness.call(decision(ACTION, 0.52), productiveOutcome))
+  const votes = Array.from({ length: 10 }, (_, index) =>
+    harness.call(decision(ACTION, 0.52), { ...productiveOutcome, actionId: `MOVE:${index}` }),
+  )
   const deferredCounts = harness.lines
     .filter((line) => line.startsWith(BETA_ABANDON_DEFERRED_MARKER))
     .map((line) => line.split(' ')[1])
@@ -247,7 +250,38 @@ addCase('(b) verified body progress defers the abandon indefinitely', () => {
       votes.every((vote) => !vote.adopt) &&
       countOf(harness.lines, BETA_ABANDON_RELEASED_MARKER) === 0 &&
       deferredCounts.every((field) => field === 'count=0/3'),
-    detail: `10 deferrals, released=${countOf(harness.lines, BETA_ABANDON_RELEASED_MARKER)}, counts=[${deferredCounts.join(',')}]`,
+    detail: `fresh outcomes=${votes.length}, released=${countOf(harness.lines, BETA_ABANDON_RELEASED_MARKER)}, counts=[${deferredCounts.join(',')}]`,
+  }
+})
+
+addCase('(b) the same cached search outcome cannot defer DECLINE forever', () => {
+  const harness = makeHarness(GOAL, 3)
+  const searchOutcome = {
+    actionId: 'MINE:ceiling',
+    status: 'success',
+    failure: null,
+    verified: true,
+    detail: 'cleared one route block',
+    execution: 'success',
+    verification: 'verified',
+    progress: 'search',
+    progressKinds: ['search'],
+    control: 'none',
+  }
+  const first = harness.call(declineDecision(0.6), searchOutcome)
+  const second = harness.call(declineDecision(0.6), searchOutcome)
+  const third = harness.call(declineDecision(0.6), searchOutcome)
+  const released = harness.call(declineDecision(0.6), searchOutcome)
+  const deferredCounts = harness.lines
+    .filter((line) => line.startsWith(BETA_ABANDON_DEFERRED_MARKER))
+    .map((line) => line.split(' ')[1])
+  return {
+    pass:
+      [first, second, third].every((vote) => !vote.adopt && vote.reason === 'body_or_search_progress') &&
+      released.adopt === true && released.wake === true && released.reason === 'semantic_abandon' &&
+      deferredCounts.join(',') === 'count=0/3,count=1/3,count=2/3' &&
+      countOf(harness.lines, BETA_ABANDON_RELEASED_MARKER) === 1,
+    detail: `same outcome counts=[${deferredCounts.join(',')}] release=${released.adopt}/${released.reason}`,
   }
 })
 

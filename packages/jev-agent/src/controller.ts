@@ -613,6 +613,7 @@ export class JevController {
   private signals: AgentSignals = emptySignals()
   private recentEvents: string[] = []
   private recentOutcomes: System2Outcome[] = []
+  private lastBetaAbandonProgressOutcome: System2Outcome | null = null
   private recentSemanticOutcomes: System2SemanticOutcome[] = []
 
   private get tickCounter(): number { return this.reachVtrCells.counters.tickCounter.value }

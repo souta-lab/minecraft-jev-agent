@@ -58,6 +58,8 @@ export interface AbandonLifecycleHost {
   readonly tickCounter: number
   unfinishedGoals(): QueuedGoal[]
   lastDecisionId: string | null
+  /** The most recent verified progress outcome already used to defer beta once. */
+  lastBetaAbandonProgressOutcome: System2Outcome | null
 }
 
 /** Beta is semantic authority only when one canonical current Option exists. */
@@ -302,7 +304,14 @@ export function betaTerminationBoundary(host: AbandonLifecycleHost, decision: Je
     return boundary
   }
   const action = decisionIdFrom(decision) ?? 'WAIT'
-  const progressed = betaAbandonProgressObserved(boundary.reason, outcome, host.lastLocomotionObservation)
+  // `recentOutcomes` is a bounded history, not a per-epoch event. The last
+  // verified search/goal outcome can remain at its tail while the same cached
+  // DECLINE is replayed. Consume that progress once so it grants one deferral;
+  // subsequent unchanged epochs advance the bounded lifecycle instead of
+  // treating the old success as fresh progress forever.
+  const freshOutcome = outcome !== null && outcome !== host.lastBetaAbandonProgressOutcome
+  const progressed = freshOutcome && betaAbandonProgressObserved(boundary.reason, outcome, host.lastLocomotionObservation)
+  if (progressed && outcome !== null) host.lastBetaAbandonProgressOutcome = outcome
   const bounded = host.betaAbandonDeferral.note({
     plan: host.betaAbandonPlanId,
     action,
