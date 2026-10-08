@@ -810,6 +810,89 @@ addCase('(f4b) an unreachable sensed cow does not suppress the habitat clearance
   }
 })
 
+addCase('(f4c) starving Y20 zombie contact keeps an independent habitat clearance offer without duplicate ids', () => {
+  const zombie = {
+    id: 44,
+    name: 'zombie',
+    kind: 'hostile',
+    username: null,
+    position: { x: 10.5, y: 28, z: -40.5 },
+    distance: 8,
+    hostile: true,
+    lineOfSight: false,
+    heldItem: null,
+    attackedSelf: false,
+  }
+  // These are the post-clearance facts from the measured sequence: the earlier
+  // ceiling blocks have already been mined, so both target-level contact and
+  // the independent animal-habitat route can ground their next ascent step.
+  const base: WorldState = { ...pocketState(20.3, [zombie]), headroomCuts: [], stepCuts: [] }
+  const staleExplore: QueuedGoal = {
+    ...foodGoal(),
+    id: 'g44:explore',
+    kind: 'explore',
+    description: 'explore cave terrain',
+    targetItem: 'explore',
+    optionInstanceId: 'explore:cave',
+    optionTemplateId: 'explore:cave',
+  }
+  const state: WorldState = {
+    ...base,
+    self: { ...base.self, health: 1, food: 0 },
+    goal: { ...base.goal, id: staleExplore.id, description: staleExplore.description, targetItem: 'explore' },
+    goalQueue: queueWith(staleExplore),
+  }
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const routes = grounded.candidates.filter((candidate) => typeof candidate.meta.foodRoute === 'string')
+  const contact = grounded.candidates.find(
+    (candidate) => candidate.meta.contactAscent === true && candidate.meta.foodRoute === 'mob_drop',
+  )
+  const habitat = grounded.candidates.find((candidate) => candidate.meta.foodHabitat === true)
+  const habitatClearance = grounded.candidates.find(
+    (candidate) => candidate.kind === 'MINE' && candidate.meta.stepOverhead === true && candidate.meta.foodHabitat === true,
+  )
+  const habitatAscent = grounded.candidates.find(
+    (candidate) => candidate.kind === 'MOVE' && candidate.meta.foodHabitat === true,
+  )
+  const ids = grounded.candidates.map((candidate) => candidate.id)
+  const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index)
+  const gap = foodSourceGap(state, defaultCandidateOptions, grounded.candidates)
+  const fed = { ...state, self: { ...state.self, health: 20, food: 20 } }
+  const fedGrounded = generateGroundedCandidates(fed, defaultCandidateOptions)
+  const heldFood = {
+    ...state,
+    inventory: { ...state.inventory, counts: { ...state.inventory.counts, cooked_beef: 1 } },
+  }
+  const heldGrounded = generateGroundedCandidates(heldFood, defaultCandidateOptions)
+  const aboveBandState: WorldState = { ...pocketState(64.3, [zombie]), headroomCuts: [], stepCuts: [] }
+  const aboveBand = generateGroundedCandidates(aboveBandState, defaultCandidateOptions)
+  const noHabitat = (candidates: typeof grounded.candidates) => !candidates.some((candidate) => candidate.meta.foodHabitat === true)
+  return {
+    pass:
+      state.self.health === 1 &&
+      state.self.food === 0 &&
+      staleExplore.optionInstanceId === 'explore:cave' &&
+      contact !== undefined &&
+      habitat !== undefined &&
+      (habitatClearance !== undefined || habitatAscent !== undefined) &&
+      habitat.meta.foodRoute === undefined &&
+      routes.length === 1 &&
+      routes[0]?.meta.foodRoute === 'mob_drop' &&
+      gap === null &&
+      duplicates.length === 0 &&
+      noHabitat(fedGrounded.candidates) &&
+      noHabitat(heldGrounded.candidates) &&
+      noHabitat(aboveBand.candidates),
+    detail:
+      `health=${state.self.health} food=${state.self.food} goal=${staleExplore.optionInstanceId} ` +
+      `contact=${contact?.id ?? 'none'} habitat=${habitat?.id ?? 'none'} ` +
+      `clearance=${habitatClearance?.id ?? 'none'} ascent=${habitatAscent?.id ?? 'none'} ` +
+      `foodRoutes=[${routes.map((candidate) => `${candidate.id}:${String(candidate.meta.foodRoute)}`).join(',')}] ` +
+      `foodGap=${gap === null ? 'none' : gap.missingLink} duplicateCount=${duplicates.length} ` +
+      `controls=fed:${noHabitat(fedGrounded.candidates)} held:${noHabitat(heldGrounded.candidates)} above:${noHabitat(aboveBand.candidates)}`,
+  }
+})
+
 // The `ASCEND:escape` last-resort arm carried the same altitude over-closure:
 // its `y < band` clause kept a NON-hungry sealed body above the band WAIT/
 // ESCALATE-only after the 25s stall measured, with no producer of the up-route.
