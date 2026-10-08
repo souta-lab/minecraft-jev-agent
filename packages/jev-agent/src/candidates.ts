@@ -14497,18 +14497,30 @@ const SURVIVAL_PILLAR_STEPS = 2
 /**
  * The cell the wall placement can attempt. `state.blocks` lists only
  * interesting (non-air) names, so a cell the scan carries is a sensed SOLID
- * and is never a fill target; a cell absent from the scan is air, fluid or
- * simply uninteresting terrain - open by the placement's fail-open-on-solids
- * rule, with the executor's live `placeOneCell` verification owning the final
- * truth. A cell the threat itself occupies is not fillable (the server
- * refuses placement inside an entity AABB).
+ * and is never a fill target; absence from this bounded scan is UNKNOWN.
+ * Placement admission requires a positive survival-wall occupancy probe, with
+ * the executor's live placeOneCell verification owning the final truth. A
+ * cell the threat itself occupies is not fillable (the server refuses
+ * placement inside an entity AABB).
  */
-function wallCellFillable(state: WorldState, cell: Vec3Json, threatCells: ReadonlySet<string>): boolean {
+function wallCellFillable(
+  state: WorldState,
+  cell: Vec3Json,
+  threatCells: ReadonlySet<string>,
+  requireSupport: boolean,
+): boolean {
   const solid = state.blocks.find(
     (block) => block.position.x === cell.x && block.position.y === cell.y && block.position.z === cell.z,
   )
   if (solid !== undefined) return false
-  return !threatCells.has(blockId('p', cell))
+  // `state.blocks` is a bounded resource projection, not occupancy truth. The
+  // server refused a p27 wall cell absent from that projection but still stone.
+  // Only the bounded live placement probe can ground the cell; absence is
+  // UNKNOWN. The upper cell may use the grounded lower placement as support.
+  const probe = state.survivalWallPlacementProbes?.find((entry) => samePosition(entry.cell, cell))
+  return probe !== undefined &&
+    !threatCells.has(blockId('p', cell)) &&
+    (!requireSupport || probe.supportBelow)
 }
 
 /**
@@ -14663,11 +14675,18 @@ function survivalShapingCandidates(
       { x: lane.x, y: wallBase, z: lane.z },
       { x: lane.x, y: wallBase + 1, z: lane.z },
     ]
-    const openCells = laneCells.filter(
-      (cell) =>
-        wallCellFillable(state, cell, threatCells) &&
-        distance(cell, state.self.eyePosition) <= options.reach + 0.5,
-    )
+    const base = laneCells[0]
+    const upper = laneCells[1]
+    const baseOpen = base !== undefined &&
+      wallCellFillable(state, base, threatCells, true) &&
+      distance(base, state.self.eyePosition) <= options.reach + 0.5
+    const upperOpen = upper !== undefined &&
+      wallCellFillable(state, upper, threatCells, !baseOpen) &&
+      distance(upper, state.self.eyePosition) <= options.reach + 0.5
+    const openCells = [
+      ...(baseOpen && base !== undefined ? [base] : []),
+      ...(upperOpen && upper !== undefined ? [upper] : []),
+    ]
     const fill = openCells.sort((a, b) => a.y - b.y).slice(0, placeable.count)
     const first = fill[0]
     if (first !== undefined) {

@@ -1331,6 +1331,77 @@ addCase('(e1) the sensor grounds escape cells only while a hostile is inside the
   }
 })
 
+addCase('(e1c) survival wall probes omit an occupied cell even when the bounded block scan misses it', () => {
+  const Vec3 = require('vec3')
+  const position = new Vec3(0.5, 10, 0.5)
+  const zombie = {
+    id: 95,
+    name: 'zombie',
+    kind: 'hostile',
+    position: new Vec3(2.5, 10, 0.5),
+    isValid: true,
+    heldItem: null,
+  }
+  const input = {
+    tick: 4,
+    goal: goalState(),
+    goalQueue: queue(),
+    recentEvents: [],
+    signals: signals(),
+  }
+  const makeBot = (occupiedBase: boolean): Bot => ({
+    username: 'AI_M3MOB',
+    entity: { id: 1, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null,
+    health: 1,
+    food: 0,
+    game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: 0, height: 256 },
+    time: { isDay: false },
+    registry: null,
+    entities: { 95: zombie },
+    inventory: { items: () => [] },
+    // findBlocks intentionally omits the occupied target, matching the
+    // bounded state.blocks projection from the live refusal. blockAt is the
+    // positive occupancy probe used at the placement boundary.
+    blockAt: (p: { x: number; y: number; z: number }) => {
+      const x = Math.floor(p.x)
+      const y = Math.floor(p.y)
+      const z = Math.floor(p.z)
+      if (y < 10 || (occupiedBase && x === 1 && y === 10 && z === 0)) {
+        return { name: 'stone', boundingBox: 'block' }
+      }
+      return { name: 'air', boundingBox: 'empty' }
+    },
+    canSeeBlock: () => false,
+    findBlocks: () => [],
+  }) as never
+
+  const occupied = buildWorldState(makeBot(true), input, defaultSensorOptions)
+  const open = buildWorldState(makeBot(false), input, defaultSensorOptions)
+  const occupiedProbes = occupied.survivalWallPlacementProbes ?? []
+  const openProbes = open.survivalWallPlacementProbes ?? []
+  const base = { x: 1, y: 10, z: 0 }
+  const upper = { x: 1, y: 11, z: 0 }
+  const hasCell = (probes: typeof occupiedProbes, cell: Vec3Json) =>
+    probes.some((probe) => probe.cell.x === cell.x && probe.cell.y === cell.y && probe.cell.z === cell.z)
+  const occupiedUpper = occupiedProbes.find((probe) => probe.cell.y === 11)
+  const openBase = openProbes.find((probe) => probe.cell.y === 10)
+  const openUpper = openProbes.find((probe) => probe.cell.y === 11)
+  const pass =
+    !hasCell(occupiedProbes, base) &&
+    hasCell(occupiedProbes, upper) &&
+    occupiedUpper?.supportBelow === true &&
+    hasCell(openProbes, base) &&
+    hasCell(openProbes, upper) &&
+    openBase?.supportBelow === true &&
+    openUpper?.supportBelow === false
+  return {
+    pass,
+    detail: 'occupied=[' + occupiedProbes.map((probe) => probe.cell.x + ',' + probe.cell.y + ',' + probe.cell.z).join('|') +
+      '] open=[' + openProbes.map((probe) => probe.cell.x + ',' + probe.cell.y + ',' + probe.cell.z + ':support=' + probe.supportBelow).join('|') + ']',
+  }
+})
+
 addCase('(e1b) historical damage does not keep a distant occluded attacker engaged forever; nearby danger and fresh hits remain', () => {
   const Vec3 = require('vec3')
   const position = new Vec3(0.5, 10, 0.5)
@@ -1474,6 +1545,10 @@ addCase('(g1) a contact melee threat with placeable dirt offers pillar and wall,
     inventory: { slots: [], counts: { dirt: 4 }, totalItems: 4 },
   })
   state.terrain = { standable: [SELF], escapeCells: [] }
+  state.survivalWallPlacementProbes = [
+    { cell: { x: 1, y: 10, z: 0 }, replaceable: true, supportBelow: true },
+    { cell: { x: 1, y: 11, z: 0 }, replaceable: true, supportBelow: false },
+  ]
   state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
   const generated = generateCandidates(state, defaultCandidateOptions)
   const offered = applyThreatRestriction(state, generated)
@@ -1494,6 +1569,8 @@ addCase('(g1) a contact melee threat with placeable dirt offers pillar and wall,
     wall.itemName === 'dirt' &&
     wall.placementCells?.length === 2 &&
     wall.placementCells[0]?.y === 10 &&
+    wall.placementCells[0]?.x === 1 &&
+    wall.placementCells[0]?.z === 0 &&
     wall.placementCells[1]?.y === 11
   return {
     pass,
@@ -1506,6 +1583,10 @@ addCase('(g2) a ranged threat suppresses the pillar but keeps the wall', () => {
     inventory: { slots: [], counts: { dirt: 4 }, totalItems: 4 },
   })
   state.terrain = { standable: [SELF], escapeCells: [] }
+  state.survivalWallPlacementProbes = [
+    { cell: { x: 1, y: 10, z: 0 }, replaceable: true, supportBelow: true },
+    { cell: { x: 1, y: 11, z: 0 }, replaceable: true, supportBelow: false },
+  ]
   state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
   const generated = generateCandidates(state, defaultCandidateOptions)
   const offered = applyThreatRestriction(state, generated)
@@ -1534,6 +1615,10 @@ addCase('(g4) one held block offers a one-cell wall and no two-step pillar', () 
     inventory: { slots: [], counts: { dirt: 1 }, totalItems: 1 },
   })
   state.terrain = { standable: [SELF], escapeCells: [] }
+  state.survivalWallPlacementProbes = [
+    { cell: { x: 1, y: 10, z: 0 }, replaceable: true, supportBelow: true },
+    { cell: { x: 1, y: 11, z: 0 }, replaceable: true, supportBelow: false },
+  ]
   state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
   const generated = generateCandidates(state, defaultCandidateOptions)
   const wall = generated.find((candidate) => candidate.meta.threatWall === true)
@@ -1562,6 +1647,9 @@ addCase('(g5) a lane cell the scan names solid is never a fill target', () => {
       adjacentStandable: null,
     },
   ]
+  state.survivalWallPlacementProbes = [
+    { cell: { x: 1, y: 11, z: 0 }, replaceable: true, supportBelow: true },
+  ]
   state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
   const generated = generateCandidates(state, defaultCandidateOptions)
   const wall = generated.find((candidate) => candidate.meta.threatWall === true)
@@ -1573,6 +1661,24 @@ addCase('(g5) a lane cell the scan names solid is never a fill target', () => {
       cells[0]?.y === 11 &&
       cells.every((cell) => !(cell.x === 1 && cell.y === 10 && cell.z === 0)),
     detail: `cells=[${cells.map((cell) => `${cell.x},${cell.y},${cell.z}`).join(';')}]`,
+  }
+})
+
+addCase('(g7) a wall cell omitted from the bounded block projection is UNKNOWN until placement evidence exists', () => {
+  const state = bodyState([hostile(95, 'zombie', { x: 2.5, y: 10, z: 0.5 })], {
+    inventory: { slots: [], counts: { dirt: 4 }, totalItems: 4 },
+  })
+  state.terrain = { standable: [SELF], escapeCells: [] }
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const unknown = generateCandidates(state, defaultCandidateOptions).find((candidate) => candidate.meta.threatWall === true)
+  state.survivalWallPlacementProbes = [
+    { cell: { x: 1, y: 10, z: 0 }, replaceable: true, supportBelow: true },
+    { cell: { x: 1, y: 11, z: 0 }, replaceable: true, supportBelow: false },
+  ]
+  const grounded = generateCandidates(state, defaultCandidateOptions).find((candidate) => candidate.meta.threatWall === true)
+  return {
+    pass: unknown === undefined && grounded?.target?.x === 1 && grounded.target.y === 10 && grounded.target.z === 0 && grounded.placementCells?.length === 2,
+    detail: `unknown=${unknown?.id ?? 'withheld'} grounded=${grounded?.id ?? 'none'}`,
   }
 })
 

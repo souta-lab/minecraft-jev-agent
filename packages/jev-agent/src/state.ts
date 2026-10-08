@@ -75,6 +75,15 @@ export type Vec3Json = {
   z: number
 }
 
+/** Positive live block truth for a bounded survival-wall cell. */
+export type SurvivalWallPlacementProbe = {
+  cell: Vec3Json
+  /** The target is loaded and replaceable; absence from this list is UNKNOWN. */
+  replaceable: true
+  /** A solid, usable support is currently below the cell. */
+  supportBelow: boolean
+}
+
 function portalCellKey(pos: Vec3Json): string {
   return `${pos.x}|${pos.y}|${pos.z}`
 }
@@ -1321,6 +1330,13 @@ export type WorldState = {
   containerContents?: ContainerObservation[]
   /** reachable air positions with solid support where a block could be placed */
   placementSpots: Vec3Json[]
+  /**
+   * SAFE/CAN: live occupancy probes for the nearest active hostile's bounded
+   * approach-lane wall cells. The ordinary `blocks` list is a capped resource
+   * projection, so an omitted stone block cannot be treated as empty. Only
+   * positive replaceable cell reads are carried; absent means UNKNOWN.
+   */
+  survivalWallPlacementProbes?: SurvivalWallPlacementProbe[]
   /**
    * Exact under-body cell that can be filled to CREATE load-bearing footing for
    * a pillar. Separate from `placementSpots`: that generic station/build surface
@@ -4759,6 +4775,59 @@ function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState):
   return spots.slice(0, options.maxPlacementSpots)
 }
 
+/**
+ * Probe the nearest active hostile's closest adjacent wall lane at both body
+ * heights. A two-cell sequence needs positive target occupancy for both cells;
+ * the first cell also needs live ground support. This bounded safety
+ * observation does not promote the resource block scan into occupancy truth.
+ */
+function buildSurvivalWallPlacementProbes(
+  bot: Bot,
+  self: SelfState,
+  entities: readonly EntityState[],
+  lastDamage: LastDamageEvidence | null | undefined,
+  nowMs: number,
+): SurvivalWallPlacementProbe[] {
+  const threat = activeThreats(entities, lastDamage, nowMs)[0]
+  if (threat === undefined) return []
+  const feet = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  let lane: Vec3Json | null = null
+  let laneDistance = Number.POSITIVE_INFINITY
+  for (const dx of [-1, 0, 1]) {
+    for (const dz of [-1, 0, 1]) {
+      if (dx === 0 && dz === 0) continue
+      const cell = { x: feet.x + dx, y: Math.floor(threat.position.y), z: feet.z + dz }
+      const candidateDistance = distance(cell, threat.position)
+      if (candidateDistance < laneDistance) {
+        laneDistance = candidateDistance
+        lane = cell
+      }
+    }
+  }
+  if (lane === null) return []
+  const scratch = bot.entity.position.clone()
+  const out: SurvivalWallPlacementProbe[] = []
+  for (const cell of [lane, { ...lane, y: lane.y + 1 }]) {
+    const target = sensorBlockAt(bot, scratch.set(cell.x, cell.y, cell.z), 'survival-wall-target')
+    if (
+      target === null ||
+      (!isReplaceableAir(target) && !PROBE_FLUIDS.has(target.name)) ||
+      PROBE_HAZARDS.has(target.name)
+    ) continue
+    const below = sensorBlockAt(bot, scratch.set(cell.x, cell.y - 1, cell.z), 'survival-wall-support')
+    out.push({
+      cell,
+      replaceable: true,
+      supportBelow: isUsableGroundSupport(below),
+    })
+  }
+  return out
+}
+
 /** The subset of `spots` whose only body access is a fluid column. */
 function submergedPlacementSpots(bot: Bot, spots: readonly Vec3Json[]): Vec3Json[] {
   return spots.filter((spot) => placementAccessSubmerged(bot, spot))
@@ -6010,6 +6079,13 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   const pillarFootingPlacement =
     selectPlaceableBlock(scaffoldCounts) === null ? null : buildPillarFootingPlacement(bot, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage, timestampMs)
+  const survivalWallPlacementProbes = buildSurvivalWallPlacementProbes(
+    bot,
+    self,
+    entities,
+    input.signals.lastDamage ?? null,
+    timestampMs,
+  )
   const survivalDigCells = buildSurvivalDigCells(
     bot,
     self,
@@ -6080,6 +6156,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       ? {}
       : { containerContents: input.containerContents.map((entry) => ({ ...entry, items: entry.items.map((stack) => ({ ...stack })) })) }),
     placementSpots,
+    ...(survivalWallPlacementProbes.length === 0 ? {} : { survivalWallPlacementProbes }),
     ...(pillarFootingPlacement === null ? {} : { pillarFootingPlacement }),
     submergedPlacementSpots: submergedPlacementSpots(bot, placementSpots),
     // Sensing is gated on the material possibility (a bridge needs a block to
