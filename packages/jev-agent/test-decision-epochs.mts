@@ -574,4 +574,54 @@ assert.equal(explore.calls.length, 7, 'a different exploration corridor must req
 await decide(explore.host, worldState(113), [explorationStep(24, 21, 65), WAIT], 'path_completed', 'new-level')
 assert.equal(explore.calls.length, 8, 'an exploration level change must requery')
 
+// The live surface search can also produce diagonal/irregular cells without an
+// explicit exploreRoute anchor. Those realizations still share the compiler's
+// declared purpose; coordinate churn must not reopen WHICH on every step.
+function unanchoredExploreMove(x: number, z: number, purpose = 'search:explore:surface'): Candidate {
+  return candidate({
+    id: `MOVE:p${x}_67_${z}`,
+    kind: 'MOVE',
+    label: `walk toward unexplored terrain (${x},67,${z})`,
+    target: { x, y: 67, z },
+    inReach: true,
+    meta: { explore: true, purpose },
+  })
+}
+const genericExplore = harness()
+withProjection(genericExplore.host, {
+  identityContext: { optionInstanceId: 'explore:surface', dimension: OVERWORLD, worldEpoch: 1 },
+})
+let genericCallId: string | null = null
+for (let step = 0; step < 6; step += 1) {
+  const move = unanchoredExploreMove(7215 + step, 1277 + step)
+  assert.equal(move.meta.exploreRoute, undefined, 'fixture reproduces generic moves without an explicit corridor anchor')
+  const answer = await decide(genericExplore.host, worldState(120 + step), [move, WAIT], 'path_completed', 'generic-explore-route')
+  assert.equal(answer.answers.action!.value, move.id, 'the cached semantic choice repoints to the current grounded cell')
+  if (step === 0) genericCallId = answer.callId
+  assert.equal(answer.callId, genericCallId, 'equivalent unanchored explore cells replay the original typed answer')
+  assert.equal(genericExplore.calls.length, 1, 'coordinate realization churn does not buy another provider call')
+  emitSkillOutcomePacket(genericExplore.host, {
+    actionId: move.id, kind: 'MOVE', leaseEpoch: null, status: 'done', failure: null,
+    verified: true, progressed: false, itemsGained: 0, blockRemoved: false,
+    entityDefeated: false, targetName: null, candidate: move, verification: 'arrived',
+  })
+}
+const changedGenericPurpose = unanchoredExploreMove(7222, 1284, 'search:food')
+await decide(genericExplore.host, worldState(126), [changedGenericPurpose, WAIT], 'path_completed', 'changed-generic-purpose')
+assert.equal(genericExplore.calls.length, 2, 'a real search-purpose change still requeries')
+const anchoredExplore = {
+  ...changedGenericPurpose,
+  id: 'MOVE:known-destination-a',
+  meta: { ...changedGenericPurpose.meta, approachTarget: 'resource:oak_log@7210,67,1284', approachLeg: 'explore_resource' },
+}
+await decide(genericExplore.host, worldState(127), [anchoredExplore, WAIT], 'path_completed', 'anchored-destination')
+assert.equal(genericExplore.calls.length, 3, 'a newly named destination is a new semantic choice')
+const changedAnchoredDestination = {
+  ...anchoredExplore,
+  id: 'MOVE:known-destination-b',
+  meta: { ...anchoredExplore.meta, approachTarget: 'resource:oak_log@7211,67,1284' },
+}
+await decide(genericExplore.host, worldState(128), [changedAnchoredDestination, WAIT], 'path_completed', 'changed-anchored-destination')
+assert.equal(genericExplore.calls.length, 4, 'changing the real destination still requeries')
+
 process.stdout.write('decision-epochs (§18 Gate C): PASS (includes six explore steps / one provider call)\n')

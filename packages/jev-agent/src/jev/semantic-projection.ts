@@ -91,8 +91,8 @@ export const JEV_BOUNDARY_MARKERS: readonly string[] = [
 ]
 
 /** Version of the projection contract. Bump only with a shape/semantics change. */
-export const JEV_PROJECTION_VERSION = 9
-export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v9'
+export const JEV_PROJECTION_VERSION = 10
+export const JEV_PROJECTION_SCHEMA = 'jev-semantic-projection/v10'
 
 /**
  * Semantic (not temporal) bounds. A 20-minute run cannot produce a materially
@@ -570,6 +570,16 @@ export function semanticTargetRef(candidate: Candidate): SemanticTargetRef {
       const exploreRoute = metaString(candidate, 'exploreRoute')
       if (candidate.kind === 'MOVE' && candidate.meta.explore === true && exploreRoute !== null) {
         return { kind: 'route', key: `explore:${exploreRoute}`, label: `explore ${exploreRoute}` }
+      }
+      // Some grounded search realizations (notably diagonal/irregular surface
+      // steps) have no single-axis `exploreRoute` anchor. If they still carry
+      // the compiler's explicit search purpose, that purpose is their stable
+      // semantic commitment; the destination cell is only a mechanical
+      // realization. Named approach targets above and purpose changes remain
+      // distinct decisions.
+      const explorePurpose = metaString(candidate, 'purpose')
+      if (candidate.kind === 'MOVE' && candidate.meta.explore === true && explorePurpose !== null) {
+        return { kind: 'route', key: `explore-purpose:${explorePurpose}`, label: `explore ${explorePurpose}` }
       }
       const cell = candidate.target === null ? 'none' : cellKey(candidate.target)
       return { kind: 'position', key: `cell:${cell}`, label: `destination ${cell}` }
