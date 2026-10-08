@@ -349,6 +349,8 @@ Mechanically equivalent realizations may change as Mineflayer moves. Their seman
 
 Do not let changing coordinates, scheduler revisions, heartbeat counters, or a newly mined support block alone manufacture a new WHICH question if the semantic commitment is unchanged.
 
+For generic explore `MOVE` candidates, key the commitment by the compiler's stable search purpose. A derived corridor anchor may appear or disappear as body alignment changes; named approach targets and changed search purposes remain distinct identities.
+
 ### 5.4 Singleton candidates: fix the epoch, not authority with a hack
 
 Some public harnesses resolve deterministic singleton target heads locally. Our frozen V4.1.2 has stricter ownership rules and historical tests preventing an ad-hoc `candidateCount == 1 -> skip Typed Decision Plane` policy bypass.

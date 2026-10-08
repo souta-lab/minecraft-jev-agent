@@ -173,10 +173,10 @@ assert.equal(
   'the raw optionSpec must never reach inference',
 )
 
-assert.equal(payload.schema, 'jev-semantic-projection/v10')
-assert.equal(payload.version, 10)
+assert.equal(payload.schema, 'jev-semantic-projection/v11')
+assert.equal(payload.version, 11)
 assert.equal(typeof payload.projectionHash, 'string')
-assert.match(payload.projectionHash as string, /^jp10:/)
+assert.match(payload.projectionHash as string, /^jp11:/)
 
 // --- 3. Determinism: the compiler is a pure function. ---
 const again = buildJevSemanticProjection(projectionInput())
@@ -263,4 +263,4 @@ const legacy = authorityState({
 assert.ok(legacy.self !== undefined && legacy.signals !== undefined && legacy.candidates !== undefined)
 assert.equal((legacy as Record<string, unknown>).schema, undefined)
 
-process.stdout.write('decision-state v10 (§18 Gate B): PASS\n')
+process.stdout.write('decision-state v11 (§18 Gate B): PASS\n')

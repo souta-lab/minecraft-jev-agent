@@ -569,10 +569,13 @@ const unanchoredMove = { ...latestExplore, meta: {} }
 await decide(explore.host, worldState(110), [unanchoredMove, WAIT], 'path_completed', 'ordinary-move')
 await decide(explore.host, worldState(111), [{ ...unanchoredMove, id: 'MOVE:p21_64_24', target: { x: 21, y: 64, z: 24 } }, WAIT], 'path_completed', 'ordinary-destination-change')
 assert.equal(explore.calls.length, 6, 'ordinary destination MOVEs retain exact cell identity')
-await decide(explore.host, worldState(112), [explorationStep(24, 21), WAIT], 'path_completed', 'parallel-corridor')
-assert.equal(explore.calls.length, 7, 'a different exploration corridor must requery')
-await decide(explore.host, worldState(113), [explorationStep(24, 21, 65), WAIT], 'path_completed', 'new-level')
-assert.equal(explore.calls.length, 8, 'an exploration level change must requery')
+const parallelCorridor = explorationStep(24, 21)
+await decide(explore.host, worldState(112), [parallelCorridor, WAIT], 'path_completed', 'parallel-corridor')
+assert.equal(explore.calls.length, 7, 'switching from an ordinary destination to the explore purpose re-queries')
+const levelChangedCorridor = explorationStep(24, 21, 65)
+const levelChangedAnswer = await decide(explore.host, worldState(113), [levelChangedCorridor, WAIT], 'path_completed', 'new-level')
+assert.equal(levelChangedAnswer.answers.action!.value, levelChangedCorridor.id, 'the same search purpose repoints across a level realization')
+assert.equal(explore.calls.length, 7, 'level and cell realization changes under the same purpose do not requery')
 
 // The live surface search can also produce diagonal/irregular cells without an
 // explicit exploreRoute anchor. Those realizations still share the compiler's
@@ -606,6 +609,37 @@ for (let step = 0; step < 6; step += 1) {
     entityDefeated: false, targetName: null, candidate: move, verification: 'arrived',
   })
 }
+
+// The first surface realization can be one block above the body and therefore
+// have no axis route anchor. After arriving, the next same-purpose realization
+// may be level with the body and acquire `exploreRoute`. That anchor describes
+// the current mechanical step; it must not create a new semantic epoch.
+const routeAnchorTransition = harness()
+withProjection(routeAnchorTransition.host, {
+  identityContext: { optionInstanceId: 'explore:surface', dimension: OVERWORLD, worldEpoch: 1 },
+})
+const elevatedExploreMove = unanchoredExploreMove(7215, 1277)
+const elevatedAnswer = await decide(routeAnchorTransition.host, worldState(140), [elevatedExploreMove, WAIT], 'path_completed', 'surface-step-elevated')
+const elevatedCallId = elevatedAnswer.callId
+assert.equal(elevatedAnswer.answers.action!.value, elevatedExploreMove.id)
+emitSkillOutcomePacket(routeAnchorTransition.host, {
+  actionId: elevatedExploreMove.id, kind: 'MOVE', leaseEpoch: null, status: 'done', failure: null,
+  verified: true, progressed: false, itemsGained: 0, blockRemoved: false,
+  entityDefeated: false, targetName: null, candidate: elevatedExploreMove, verification: 'arrived',
+})
+const levelExploreMove = candidate({
+  id: 'MOVE:p7216_66_1277', kind: 'MOVE', label: 'walk toward unexplored terrain (7216,66,1277)',
+  target: { x: 7216, y: 66, z: 1277 }, inReach: true,
+  meta: { explore: true, purpose: 'search:explore:surface', exploreRoute: 'x+1:z=1277:y=66' },
+})
+const levelAnswer = await decide(routeAnchorTransition.host, worldState(141), [levelExploreMove, WAIT], 'path_completed', 'surface-step-level')
+assert.equal(levelAnswer.callId, elevatedCallId, 'the same surface purpose survives the appearance of a mechanical route anchor')
+assert.equal(levelAnswer.answers.action!.value, levelExploreMove.id, 'a replay repoints to the newly grounded route realization')
+assert.equal(routeAnchorTransition.calls.length, 1, 'changing only mechanical route realization does not call the provider again')
+const changedRoutePurpose = { ...levelExploreMove, id: 'MOVE:p7217_66_1277', meta: { ...levelExploreMove.meta, purpose: 'search:food' } }
+await decide(routeAnchorTransition.host, worldState(142), [changedRoutePurpose, WAIT], 'path_completed', 'changed-purpose-with-route-anchor')
+assert.equal(routeAnchorTransition.calls.length, 2, 'a real purpose change still re-queries when an exploreRoute is present')
+
 const changedGenericPurpose = unanchoredExploreMove(7222, 1284, 'search:food')
 await decide(genericExplore.host, worldState(126), [changedGenericPurpose, WAIT], 'path_completed', 'changed-generic-purpose')
 assert.equal(genericExplore.calls.length, 2, 'a real search-purpose change still requeries')
