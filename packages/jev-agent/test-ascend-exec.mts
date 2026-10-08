@@ -249,6 +249,10 @@ function makeStructuralBot(
     start?: Vec3Json
     blockAt?: (position: { x: number; y: number; z: number }) => { name: string; boundingBox: string }
     goalReach?: (goal: { constructor?: { name?: string }; x?: number; y?: number; z?: number }) => boolean
+    landAt?: (
+      goal: { constructor?: { name?: string }; x?: number; y?: number; z?: number },
+      current: Vec3Json,
+    ) => Vec3Json
   } = {},
 ): { bot: Bot; position: P } {
   const start = options.start ?? { x: BODY_FEET.x + 0.5, y: BODY_FEET.y, z: BODY_FEET.z + 0.5 }
@@ -318,7 +322,8 @@ function makeStructuralBot(
         // Simulate the stock path walk: the body lands inside the goal cell and
         // the pathfinder reports arrival, exactly what `waitForGoal` listens for.
         if (typeof goal.x === 'number' && typeof goal.y === 'number' && typeof goal.z === 'number') {
-          position.set(goal.x, goal.y, goal.z)
+          const landing = options.landAt?.(goal, position) ?? { x: goal.x, y: goal.y, z: goal.z }
+          position.set(landing.x, landing.y, landing.z)
         }
         setTimeout(() => emit('goal_reached'), 0)
       },
@@ -657,6 +662,76 @@ addCase('a staircase-up step paths with an occupancy goal (GoalBlock), never adj
   return {
     pass: stepped && adjacency === 0 && occupancy > 0,
     detail: `ASCEND_STEP=${logs.some((line) => line.message.startsWith('ASCEND_STEP'))} goals=[${goals.join(',')}]`,
+  }
+})
+
+addCase('a staircase waypoint below its required floor cannot release the final MOVE path', async () => {
+  const step = { x: 12, y: 67, z: 25 }
+  const target = { x: 15, y: 69, z: 22 }
+  const candidate: Candidate = {
+    id: 'MOVE:p15_69_22',
+    kind: 'MOVE',
+    label: 'walk to a resource through the grounded staircase step',
+    targetName: null,
+    target,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: {
+      vertical: 'staircase-up',
+      upDigX: step.x,
+      upDigY: step.y,
+      upDigZ: step.z,
+      upStepX: step.x,
+      upStepY: step.y,
+      upStepZ: step.z,
+    },
+  }
+  const goals: string[] = []
+  const logs: CapturedLog[] = []
+  let finalTargetAttempted = false
+  const { bot } = makeStructuralBot(goals, {
+    start: { x: 12.5, y: 66.8, z: 26.5 },
+    blockAt: () => ({ name: 'air', boundingBox: 'empty' }),
+    goalReach: (goal) => {
+      const isStep = goal.x === step.x && goal.y === step.y && goal.z === step.z
+      if (!isStep) finalTargetAttempted = true
+      return isStep
+    },
+    // The pathfinder reports the same x/z step cell reached while the body is
+    // still 0.2 blocks below its floor. This is the live false-arrival shape:
+    // the loose 0.75 vertical tolerance accepts it, but no ascent occurred.
+    landAt: (goal, current) =>
+      goal.x === step.x && goal.y === step.y && goal.z === step.z
+        ? { x: step.x + 0.3, y: current.y, z: step.z + 0.3 }
+        : { x: goal.x ?? current.x, y: goal.y ?? current.y, z: goal.z ?? current.z },
+  })
+  const executor = new Executor(bot, makeCapturingLogger(logs), {
+    ...defaultExecutorOptions,
+    actuation: 'pathfinder',
+    pathTimeoutMs: 250,
+    pickupPathTimeoutMs: 250,
+    packetStepMs: 0,
+    maxStepsPerWaypoint: 1,
+  })
+  const claim = fixtureClaim(executor, candidate)
+  const result = await Promise.race([
+    claim.completion,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+  ])
+  if (result === null) executor.cancelCurrent('below-floor staircase waypoint fixture timed out')
+  const pass =
+    result !== null &&
+    result.status === 'failed' &&
+    result.failure === 'path_stuck' &&
+    !finalTargetAttempted
+  return {
+    pass,
+    detail: `result=${result?.status ?? 'timeout'} failure=${result?.failure ?? 'none'} ` +
+      `finalTargetAttempted=${finalTargetAttempted} goals=[${goals.join(',')}]`,
   }
 })
 

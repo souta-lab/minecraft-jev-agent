@@ -1411,6 +1411,21 @@ export function isAtRequiredLevel(
   )
 }
 
+/** A staircase waypoint is complete only when the body occupies its target floor. */
+export function occupiesRequiredStepCell(
+  position: { x: number; y: number; z: number },
+  target: Vec3Json,
+  horizontalTolerance = 1.2,
+): boolean {
+  const sameTargetCell =
+    Math.floor(position.x) === Math.floor(target.x) && Math.floor(position.z) === Math.floor(target.z)
+  return (
+    sameTargetCell &&
+    Math.hypot(position.x - target.x, position.z - target.z) <= horizontalTolerance &&
+    Math.floor(position.y) === Math.floor(target.y)
+  )
+}
+
 export type RetrieveApproachOutcome = 'arrived' | 'progressed' | 'stalled'
 
 export interface RetrieveApproachInput {
@@ -5369,7 +5384,7 @@ export class Executor {
           ? error
           : new ExecutorError('path_stuck', `vertical step failed: ${error instanceof Error ? error.message : String(error)}`)
       }
-      if (!isAtRequiredLevel(this.bot.entity.position, step)) {
+      if (!occupiesRequiredStepCell(this.bot.entity.position, step)) {
         throw new ExecutorError(
           'path_stuck',
           `vertical step did not reach (${step.x},${step.y},${step.z}) from (${round2(this.bot.entity.position.x)},${round2(this.bot.entity.position.y)},${round2(this.bot.entity.position.z)})`,
@@ -5427,7 +5442,7 @@ export class Executor {
         ? error
         : new ExecutorError('path_stuck', `vertical step failed: ${error instanceof Error ? error.message : String(error)}`)
     }
-    if (!isAtRequiredLevel(this.bot.entity.position, step)) {
+    if (!occupiesRequiredStepCell(this.bot.entity.position, step)) {
       throw new ExecutorError(
         'path_stuck',
         `vertical step did not reach (${step.x},${step.y},${step.z}) from (${round2(this.bot.entity.position.x)},${round2(this.bot.entity.position.y)},${round2(this.bot.entity.position.z)})`,
