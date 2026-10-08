@@ -12,6 +12,7 @@
 import { applyReachabilityGate, blockId, defaultCandidateOptions, formatLogRoute, generateGroundedCandidates, logCollectGoal, logRouteOf } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
+import { selectPickupCompatibleStand } from './src/state.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, BlockState, GoalState, HeadroomCut, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
@@ -370,6 +371,37 @@ addCase('being at an interaction stand does not make a three-block-high log drop
   return {
     pass: grounded.candidates.every((candidate) => candidate.id !== mineId),
     detail: `mine=${grounded.candidates.some((candidate) => candidate.id === mineId)} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+  }
+})
+
+addCase('a focused canopy log selects a distinct pickup-compatible stand and offers MOVE', () => {
+  const feet: Vec3Json = { x: 0.5, y: 60, z: 0.5 }
+  const blockPosition: Vec3Json = { x: 0, y: 63, z: 1 }
+  const currentInteractionStand: Vec3Json = { x: 0, y: 60, z: 0 }
+  const pickupStand: Vec3Json = { x: 0, y: 62, z: 0 }
+  const selectedStand = selectPickupCompatibleStand(blockPosition, [currentInteractionStand, pickupStand])
+  const sensed = logBlock(blockPosition, {
+    inReach: true,
+    visible: true,
+    distance: 3.2,
+    adjacentStandable: selectedStand,
+    hasAdjacentStandable: selectedStand !== null,
+  })
+  const state = worldState({
+    position: feet,
+    standable: [feet, pickupStand],
+    blocks: [sensed],
+    goalQueue: queueWith(queuedGoal({})),
+  })
+  const grounded = generateGroundedCandidates(state, options())
+  const mineId = `MINE:${blockId('b', blockPosition)}`
+  const move = grounded.candidates.find((candidate) =>
+    candidate.kind === 'MOVE' && candidate.target?.x === pickupStand.x &&
+    candidate.target?.y === pickupStand.y && candidate.target?.z === pickupStand.z,
+  )
+  return {
+    pass: selectedStand === pickupStand && move !== undefined && grounded.candidates.every((candidate) => candidate.id !== mineId),
+    detail: `selected=${JSON.stringify(selectedStand)} move=${move?.id ?? 'none'} unsafeMine=${grounded.candidates.some((candidate) => candidate.id === mineId)} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
   }
 })
 

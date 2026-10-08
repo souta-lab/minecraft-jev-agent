@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, HarvestTool, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyIsSubmerged, bodyNeedsBreathEscape, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames, waterRouteBreathOk } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, PICKUP_MINE_HORIZONTAL, PICKUP_MINE_VERTICAL, bodyHasUnknownAirWithSubmergedEyes, bodyIsOutOfAir, bodyIsSubmerged, bodyNeedsBreathEscape, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames, waterRouteBreathOk } from './state.ts'
 import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
 import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
 import { findInventoryFuel, goalResourceMatches, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -3930,9 +3930,7 @@ const DEFAULT_PLACE_SPOT_RETRY_LIMIT = 2
  */
 const DEFAULT_FOOD_HUNT_RANGE = 24
 /** A block drop inside this horizontal distance can be collected without a post-dig walk. */
-const PICKUP_MINE_HORIZONTAL = 1.3
 /** Vertical band (relative to the feet) in which a drop still lands in reach. */
-const PICKUP_MINE_VERTICAL = 1.5
 
 export const defaultCandidateOptions: CandidateOptions = {
   reach: 4.5,

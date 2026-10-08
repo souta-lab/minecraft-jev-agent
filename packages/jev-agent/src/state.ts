@@ -75,6 +75,26 @@ export type Vec3Json = {
   z: number
 }
 
+/** Pickup envelope used when a harvested item must enter inventory. */
+export const PICKUP_MINE_HORIZONTAL = 1.3
+export const PICKUP_MINE_VERTICAL = 1.5
+
+/**
+ * Choose a grounded interaction stand from the sensor's already validated
+ * stand list that also leaves the block drop inside the pickup envelope.
+ * `stands` must come from `interactionStandCells`; this helper checks only the
+ * resource geometry and never invents a stand or route.
+ */
+export function selectPickupCompatibleStand(
+  block: Vec3Json,
+  stands: readonly Vec3Json[],
+): Vec3Json | null {
+  return stands.find((stand) =>
+    Math.hypot(block.x - stand.x, block.z - stand.z) <= PICKUP_MINE_HORIZONTAL &&
+    Math.abs(block.y - stand.y) <= PICKUP_MINE_VERTICAL,
+  ) ?? null
+}
+
 /** Positive live block truth for a bounded survival-wall cell. */
 export type SurvivalWallPlacementProbe = {
   cell: Vec3Json
@@ -2370,7 +2390,7 @@ export function interactionStandCells(
  * Same interaction geometry as `interactionStandCells`; the sensor answers the
  * closest such stance so a MOVE can be targeted at it.
  */
-function findAdjacentStandable(bot: Bot, target: Vec3Json, reach: number): Vec3Json | null {
+function findAdjacentStandable(bot: Bot, target: Vec3Json, reach: number, preferPickupStand = false): Vec3Json | null {
   const probe: InteractionStandProbe = {
     passable: (x, y, z) => isPassable(sensorBlockAt(bot, toVec3(bot, { x, y, z }))),
     // Usable ground, matching the old isStandable call: leaves are solid but
@@ -2378,6 +2398,10 @@ function findAdjacentStandable(bot: Bot, target: Vec3Json, reach: number): Vec3J
     solidSupport: (x, y, z) => isUsableGroundSupport(sensorBlockAt(bot, toVec3(bot, { x, y, z }))),
   }
   const stands = interactionStandCells(target, vecJson(bot.entity.position), probe, reach)
+  if (preferPickupStand) {
+    const pickupStand = selectPickupCompatibleStand(target, stands)
+    if (pickupStand !== null) return pickupStand
+  }
   return stands[0] ?? null
 }
 
@@ -3198,7 +3222,8 @@ function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState, focus
     ...rows.filter((row) => !focusedCells.has(`${row.pos.x},${row.pos.y},${row.pos.z}`)),
   ].slice(0, options.maxLogs)
   return retained.map((row) => {
-    const adjacentStandable = findAdjacentStandable(bot, row.pos, options.reach)
+    const focusedProducer = focusItem !== null && resourceMatches(row.harvest.yield, focusItem)
+    const adjacentStandable = findAdjacentStandable(bot, row.pos, options.reach, focusedProducer)
     return {
       kind: 'log' as const,
       name: row.block.name,
