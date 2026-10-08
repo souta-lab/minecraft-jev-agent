@@ -2323,6 +2323,18 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
   const standoff = input.standoff ?? THREAT_STANDOFF_RANGE
   const max = Math.max(0, input.max ?? 3)
   if (max === 0) return []
+  // The body's position includes sub-block coordinates, while standable and
+  // escape cells are integer block coordinates. Comparing the cell corner to
+  // the body position let the current stand cell appear to gain separation
+  // (for example +0.33 m) and be offered as RETREAT. Mineflayer then considered
+  // the body already arrived ~0.59 m from that target without moving. A retreat
+  // destination must leave the current feet cell; coordinate rounding is not
+  // locomotion.
+  const currentFeetCell = cellKey({
+    x: Math.floor(input.self.x),
+    y: Math.floor(input.self.y),
+    z: Math.floor(input.self.z),
+  })
   const current = distance(input.self, threat)
   const transfer = new Set((input.transferCells ?? []).map(cellKey))
   const occluded = new Set((input.occludedCells ?? []).map(cellKey))
@@ -2332,6 +2344,7 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
     const key = cellKey(spot)
     if (seen.has(key)) return
     seen.add(key)
+    if (key === currentFeetCell) return
     // A transfer cell is not a destination this solver may offer, whatever its
     // separation: the realization would leave the dimension, not keep distance.
     if (transfer.has(key)) return

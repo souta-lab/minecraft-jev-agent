@@ -437,6 +437,45 @@ addCase('(i5) a cell out of the attacker sight line is a grounded keep-distance 
   }
 })
 
+addCase('(i5a) the current feet cell is not a retreat when block-corner rounding fakes separation', () => {
+  // Source-bound p27.43: self=(7179.304,37,1257.501), spider=(7183.3,42.1,1259.3),
+  // and RETREAT:p7179_37_1257 targeted the body's own feet cell. Comparing that
+  // cell corner to self added 0.33 m of apparent separation; the pathfinder then
+  // reported arrival at 0.59 m with no body movement.
+  const self: Vec3Json = { x: 7179.3040031900055, y: 37, z: 1257.5011034200102 }
+  const threat: Vec3Json = { x: 7183.3, y: 42.1, z: 1259.3 }
+  const currentCell: Vec3Json = { x: 7179, y: 37, z: 1257 }
+  const adjacentCover: Vec3Json = { x: 7180, y: 37, z: 1257 }
+  const onlyCurrentCell = selectKeepDistanceSpots({
+    self,
+    threat,
+    standable: [currentCell],
+    standoff: 4.5,
+  })
+  const withAdjacentCover = selectKeepDistanceSpots({
+    self,
+    threat,
+    standable: [currentCell, adjacentCover],
+    occludedCells: [currentCell, adjacentCover],
+    standoff: 4.5,
+  })
+  const retainedCover = withAdjacentCover.find((spot) =>
+    spot.spot.x === adjacentCover.x && spot.spot.y === adjacentCover.y && spot.spot.z === adjacentCover.z,
+  )
+  const currentDistance = Math.hypot(self.x - threat.x, self.y - threat.y, self.z - threat.z)
+  const roundedCellDistance = Math.hypot(currentCell.x - threat.x, currentCell.y - threat.y, currentCell.z - threat.z)
+  const pass =
+    roundedCellDistance > currentDistance &&
+    roundedCellDistance - currentDistance < MIN_KEEP_DISTANCE_GAIN &&
+    onlyCurrentCell.length === 0 &&
+    retainedCover?.occluded === true &&
+    retainedCover.gain < 0
+  return {
+    pass,
+    detail: `currentCellGain=${Math.round((roundedCellDistance - currentDistance) * 100) / 100} onlyCurrent=${onlyCurrentCell.length} adjacentCover=${retainedCover?.occluded}/${Math.round((retainedCover?.gain ?? 0) * 100) / 100}`,
+  }
+})
+
 addCase('(i6) a body pocketed between two hostiles still gets a disengage offer, never ATTACK-only', () => {
   // Measured portal-p15: `JEV_CANDIDATE_SET count=2 ids=[ATTACK:e1512,ATTACK:e1492]`
   // with the skeleton 5.24m away - the strict per-threat separation rule
