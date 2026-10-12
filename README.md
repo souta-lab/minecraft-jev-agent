@@ -134,9 +134,12 @@ Everything else — the `bun-tests` repository battery (187/188), the M2 chain r
 (`tools/m2-chain-execution.mjs` drives 8/8 links, fixture 12/12), the buddy-driver package suite
 (82/82), `bun run typecheck`, `movement-patch:check`, `contract-docs-check` (5/5), `lane-guard`
 (NO_DUPLICATES) and `frontier:check` (exit 0) — is green on this commit. GitHub Actions executes
-again now that the repository is public (public repositories use the free tier), and its
-`core-deterministic`, `system2-harness`, `authority-contract` and `jev-harness` jobs pass; the
-`convergence` job stops at `issue-state:check` for the reason recorded above.
+now that the repository is public, and its `core-deterministic`, `system2-harness`,
+`authority-contract` and `jev-harness` jobs pass. The `convergence` job stops at
+`issue-state:check` for the reason above; it also reports an explicit skip for
+`clean-run-harness-test`, whose manifest/attestation cases verify the clean-run contract's pinned
+host Java runtime (`/usr/lib/jvm/java-21-openjdk-amd64/bin/java`, `21.0.13-ea`) against the real
+file and therefore cannot run on a runner without that exact build.
 
 The movement patch is reversible: `rm -rf node_modules && bun install --frozen-lockfile
 --ignore-scripts` restores stock `mineflayer`.
