@@ -40,6 +40,14 @@
 //      directory as --server-root are all REFUSED;
 //   H. CLI surfaces: --help exit 0 for both tools, a missing --environment exits 2.
 //
+//
+// HOST PRECONDITION: the clean-run contract pins one host Java runtime by absolute
+// path AND version (`/usr/lib/jvm/java-21-openjdk-amd64/bin/java`, `21.0.13-ea`),
+// and the manifest/attestation cases verify that identity against the real file. On
+// a machine without that exact runtime those cases cannot run at all, so the CI
+// workflow reports an explicit skip instead of a failure. The other cases in this
+// file have no host dependency.
+//
 // Usage: bun tools/test-clean-run-harness.mjs
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
