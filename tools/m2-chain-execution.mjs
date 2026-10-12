@@ -639,9 +639,9 @@ function craftWindowPutAway(world, bot, start, end) {
 // ---------------------------------------------------------------------------
 
 const IRON_ORE_CELLS = Object.freeze([
-  { x: 2, y: FEET_Y, z: 0 },
-  { x: 2, y: FEET_Y, z: 1 },
-  { x: 1, y: FEET_Y, z: 1 },
+  { x: 1, y: FEET_Y, z: 0 },
+  { x: 0, y: FEET_Y, z: 1 },
+  { x: -1, y: FEET_Y, z: 0 },
 ])
 const FURNACE_CELL = Object.freeze({ x: -3, y: FEET_Y, z: 0 })
 const TABLE_CELL = Object.freeze({ x: -8, y: FEET_Y, z: 0 })
@@ -651,28 +651,31 @@ const TABLE_STAND = Object.freeze({ x: -6.5, y: FEET_Y, z: 0.5 })
 
 /**
  * Ten hazard-free obsidian cells inside ONE pickup envelope of ORE_STAND.
- * `mineCandidates` only offers a MINE when the cell is pickup-adjacent
- * (`PICKUP_MINE_HORIZONTAL = 2.75` measured centre-to-centre from the feet cell),
- * so a cell outside that ring is a MOVE, not a mine - and an obsidian source a
- * body cannot pick up is not a completed link.
+ * `mineCandidates` only offers a MINE when the cell is inside the pickup
+ * envelope (`PICKUP_MINE_HORIZONTAL = 1.3` horizontal, `PICKUP_MINE_VERTICAL =
+ * 1.5` vertical, both measured from the feet), so a cell outside that ring is a
+ * MOVE, not a mine - and a source a body cannot pick up is not a completed link.
+ * Cells one level above or below the feet stay inside the vertical band while
+ * keeping the horizontal distance at 1.0 from ORE_STAND, which is what lets ten
+ * distinct cells fit in one envelope.
  */
 const OBSIDIAN_CELLS = Object.freeze([
   { x: 1, y: FEET_Y, z: 0 },
   { x: -1, y: FEET_Y, z: 0 },
   { x: 0, y: FEET_Y, z: 1 },
   { x: 0, y: FEET_Y, z: -1 },
-  { x: 1, y: FEET_Y, z: 1 },
-  { x: -1, y: FEET_Y, z: 1 },
-  { x: 1, y: FEET_Y, z: -1 },
-  { x: -1, y: FEET_Y, z: -1 },
-  { x: 2, y: FEET_Y, z: 0 },
-  { x: 0, y: FEET_Y, z: 2 },
+  { x: 1, y: FEET_Y + 1, z: 0 },
+  { x: -1, y: FEET_Y + 1, z: 0 },
+  { x: 0, y: FEET_Y + 1, z: 1 },
+  { x: 0, y: FEET_Y + 1, z: -1 },
+  { x: 1, y: FEET_Y - 1, z: 0 },
+  { x: -1, y: FEET_Y - 1, z: 0 },
 ])
-/** Three diamond cells within one interaction envelope of ORE_STAND. */
+/** Three diamond cells inside one pickup envelope of ORE_STAND. */
 const DIAMOND_CELLS = Object.freeze([
-  { x: 2, y: FEET_Y, z: 0 },
-  { x: 2, y: FEET_Y, z: 1 },
-  { x: 1, y: FEET_Y, z: 1 },
+  { x: 0, y: FEET_Y, z: -1 },
+  { x: 1, y: FEET_Y + 1, z: 0 },
+  { x: -1, y: FEET_Y + 1, z: 0 },
 ])
 
 /**
@@ -1006,12 +1009,20 @@ export function measureChainFrontier({ write = () => {} } = {}) {
     return entry
   }
 
+  // The source-legality question is asked from a stand the pickup envelope admits.
+  // `FRONTIER_STAND` sits 2.0 horizontal from the ring, which is inside interaction
+  // reach but OUTSIDE the collect-MINE pickup envelope (1.3 since 60368f50), so from
+  // there the correct answer for a legal source is "MOVE to the ring" and the case
+  // would measure the approach instead of whether the source is legal at all.
+  const SOURCE_STAND = Object.freeze({ x: 7.5, y: FEET_Y, z: 5.5 })
+
   measure('F1_unlit_complete_ring', 'an intact but UNLIT obsidian ring (the shape of an inherited gate or an intact ruined portal) with a diamond pickaxe', {
     inventory: { diamond_pickaxe: 1 },
     cells: ring,
     lit: false,
     focus: OBSIDIAN,
     count: 10,
+    stand: SOURCE_STAND,
   })
   measure('F2_lit_ring', 'the same ring LIT - the protected inherited portal', {
     inventory: { diamond_pickaxe: 1 },
@@ -1019,6 +1030,7 @@ export function measureChainFrontier({ write = () => {} } = {}) {
     lit: true,
     focus: OBSIDIAN,
     count: 10,
+    stand: SOURCE_STAND,
   })
   measure('F3_unlit_fragmented_ring', 'the same ring with one required EDGE missing and unlit - a damaged ruin', {
     inventory: { diamond_pickaxe: 1 },
@@ -1026,10 +1038,13 @@ export function measureChainFrontier({ write = () => {} } = {}) {
     lit: false,
     focus: OBSIDIAN,
     count: 10,
+    stand: SOURCE_STAND,
   })
   measure('F4_wrong_tool_at_source', 'ten legal scattered obsidian cells and only an iron pickaxe (obsidian needs tier 4)', {
     inventory: { iron_pickaxe: 1 },
-    cells: OBSIDIAN_CELLS.map((cell) => ({ x: cell.x, y: FEET_Y, z: cell.z })),
+    // The cells keep their own y: flattening them onto FEET_Y would collapse the
+    // vertical band into four distinct cells and the case would sense four.
+    cells: OBSIDIAN_CELLS,
     lit: false,
     focus: OBSIDIAN,
     count: 10,

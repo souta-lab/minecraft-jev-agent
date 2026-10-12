@@ -121,7 +121,6 @@ clone is not surprised, not to excuse them:
 
 | Check | Observed |
 | --- | --- |
-| `tools/test-m2-chain-execution.mjs` | L1: the real candidate layer grounds no collect candidate for `raw_iron` (`presented=PLACE:crafting_table:p0_64_1,WAIT`), so the offline chain stops at link 1 |
 | `packages/jev-agent/test-craft-log-route.mts` | 3 cases: a prerequisite log route at 50,11,32 yields `MOVE:b50_11_32,WAIT` with no vertical/place route |
 | `packages/jev-agent/test-column-descent.mts` | 5 cases: own-column pillar descent / staircase-overhead plans |
 | `packages/jev-agent/test-acquisition-route.mts` | 2 cases: missing-material producer routing and the stone-only wood-tool cycle |
@@ -131,13 +130,13 @@ clone is not surprised, not to excuse them:
 | `packages/jev-agent/test-food-route.mts` | slow fixture; fails within the repository battery |
 | `bun run issue-state:check` | `#437`/`#439`/`#440` are closed on GitHub while their machine-readable `compliance` is `unknown`. The gate is right: a closed row must be verified-complete or recorded as a superseded fold, and neither is true. It is left red rather than written to `pass`, because that would be false evidence |
 
-Everything else — the `bun-tests` repository battery (186/188), the buddy-driver package suite
+Everything else — the `bun-tests` repository battery (187/188), the M2 chain rehearsal
+(`tools/m2-chain-execution.mjs` drives 8/8 links, fixture 12/12), the buddy-driver package suite
 (82/82), `bun run typecheck`, `movement-patch:check`, `contract-docs-check` (5/5), `lane-guard`
-(NO_DUPLICATES) and `frontier:check` (exit 0) — is green on this commit. GitHub Actions itself has
-never executed a step for this `main` (the account's Actions billing is stopped), so
-`bun run current-status` reports the CI gate as `INFRA_UNKNOWN` rather than a code verdict; a public
-repository returns to the free Actions tier, after which the two checks above are the first things
-that will run red.
+(NO_DUPLICATES) and `frontier:check` (exit 0) — is green on this commit. GitHub Actions executes
+again now that the repository is public (public repositories use the free tier), and its
+`core-deterministic`, `system2-harness`, `authority-contract` and `jev-harness` jobs pass; the
+`convergence` job stops at `issue-state:check` for the reason recorded above.
 
 The movement patch is reversible: `rm -rf node_modules && bun install --frozen-lockfile
 --ignore-scripts` restores stock `mineflayer`.
