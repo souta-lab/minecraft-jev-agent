@@ -19,6 +19,8 @@ assert.ok(
 assert.ok(SHADOW_QUESTION_NAMES.includes('plan_still_valid'))
 assert.ok(!QUESTION_NAMES.includes('plan_still_valid' as never))
 assert.match(prompt, /choose exactly one id/)
-assert.match(prompt, /never invent an id/)
+// The boundary is "the prompt forbids inventing an id"; the wording itself is free to
+// change, so accept the current phrasing and its earlier equivalent.
+assert.match(prompt, /never invent (an id|one)/)
 
 process.stdout.write('jev prompt authority: PASS\n')

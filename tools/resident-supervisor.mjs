@@ -494,11 +494,6 @@ function sameResolvedPath(a, b) {
   return resolveOne(a) === resolveOne(b)
 }
 
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try { process.kill(pid, 0); return true } catch (e) { return e?.code === 'EPERM' }
-}
-
 function gitOutput(args, cwd) {
   try {
     return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()

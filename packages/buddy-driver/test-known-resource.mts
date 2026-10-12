@@ -280,7 +280,10 @@ addCase('a direct dig route suppresses later retrieval, and visible matching ore
   // overworld); an un-attributed row is refused in EVERY world by the fail-closed gate.
   const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 }, dimension: 'minecraft:overworld' }
   const proxy = worldState({
-    position: { x: 0, y: 60, z: 0 },
+    // 60368f50 tightened the collect-MINE pickup envelope to 1.3 horizontal: from
+    // (0,60,0) the block centre at (1.5,59,0.5) is 1.58 away, so the drop would
+    // land outside the pickup volume and the MINE is (correctly) withheld.
+    position: { x: 0.5, y: 60, z: 0.5 },
     goal: goal({ id: 'collect:cobblestone', targetItem: 'cobblestone', description: 'collect 41 x cobblestone (descend toward ore levels)' }),
     goalQueue: queueWith(
       queuedGoal({ id: 'g-cobble', targetItem: 'cobblestone' }),
@@ -293,7 +296,7 @@ addCase('a direct dig route suppresses later retrieval, and visible matching ore
   const hasMine = alongside.some((candidate: Candidate) => candidate.kind === 'MINE')
   const hasRetrieve = alongside.some((candidate: Candidate) => candidate.kind === 'RETRIEVE')
   const visible = worldState({
-    position: { x: 0, y: 60, z: 0 },
+    position: { x: 0.5, y: 60, z: 0.5 },
     goalQueue: queueWith(queuedGoal({})),
     blocks: [oreBlock({ x: 1, y: 60, z: 0 })],
     knownResources: [known],

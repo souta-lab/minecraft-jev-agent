@@ -2,12 +2,17 @@
 // - Random secret path (32 hex chars) is the only way in.
 // - Accepts a POST once, writes the value to a 0600 file, then exits.
 // - Never logs or echoes the submitted value.
+//
+// Usage: KEYDROP_OUT=/path/to/secret.key bun ops/keydrop/server.mjs
+//   KEYDROP_OUT  destination file (default: ~/.config/mc-ai-secrets/gateway.key)
+//   PORT         listen port (default 39321; bound to 127.0.0.1 only)
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync, existsSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { chmodSync, mkdirSync, statSync, writeFileSync, existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 
-const OUT = '/home/s0u7a/.config/kimaki-secrets/vercel-ai-gateway.key'
+const OUT = process.env.KEYDROP_OUT || join(homedir(), '.config', 'mc-ai-secrets', 'gateway.key')
 const TOKEN = randomBytes(16).toString('hex')
 const PATH = `/k/${TOKEN}`
 const PORT = Number(process.env.PORT || 39321)
@@ -30,14 +35,15 @@ const page = (msg = '') => `<!doctype html>
  button{background:#2b7;border:0;font-weight:600;color:#04140c}
  .m{background:#062;padding:.6rem;border-radius:.5rem;font-size:.9rem}
 </style></head><body>
-<h1>Vercel AI Gateway key drop (one-time)</h1>
+<h1>API key drop (one-time)</h1>
 ${msg ? `<div class="m">${msg}</div>` : ''}
 <p>${already}
+Target: ${OUT}
 
 送信するとこのPCの 0600 ファイルに直接保存され、このページは即停止します。
-キーはログ・Discord・チャットには残りません。</p>
+キーはログ・チャットには残りません。</p>
 <form method="POST" action="${PATH}">
- <input name="key" type="password" placeholder="vck_..." autocomplete="off" autocapitalize="off" spellcheck="false" required>
+ <input name="key" type="password" placeholder="paste the key value" autocomplete="off" autocapitalize="off" spellcheck="false" required>
  <button type="submit">保存（1回だけ）</button>
 </form>
 </body></html>`
@@ -92,7 +98,7 @@ const server = createServer((req, res) => {
     const written = statSync(OUT)
     console.log('[keydrop] saved submission: %d bytes, mode %s (value not logged)', written.size, (written.mode & 0o777).toString(8))
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    res.end(page('保存しました。このページは停止します。Discordに戻って「送信した」と伝えてください。'))
+    res.end(page('保存しました。このページは停止します。'))
     setTimeout(() => { server.close(() => process.exit(0)) }, 800)
   })
 })
