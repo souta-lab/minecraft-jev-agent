@@ -129,13 +129,15 @@ clone is not surprised, not to excuse them:
 | `packages/jev-agent/test-threat-response.mts` | 1 case: a completed Goal from a retired Option and the empty-queue horizon |
 | `packages/jev-agent/test-canopy-ground.mts` | 1 case: below-band canopy food-habitat refusal |
 | `packages/jev-agent/test-food-route.mts` | slow fixture; fails within the repository battery |
+| `bun run issue-state:check` | `#437`/`#439`/`#440` are closed on GitHub while their machine-readable `compliance` is `unknown`. The gate is right: a closed row must be verified-complete or recorded as a superseded fold, and neither is true. It is left red rather than written to `pass`, because that would be false evidence |
 
-Everything else — the `bun-tests` repository battery (184/188), the buddy-driver package suite
+Everything else — the `bun-tests` repository battery (186/188), the buddy-driver package suite
 (82/82), `bun run typecheck`, `movement-patch:check`, `contract-docs-check` (5/5), `lane-guard`
-(NO_DUPLICATES) — is green on this commit. GitHub Actions itself has never executed a step for this
-`main` (the account's Actions billing is stopped), so `bun run current-status` reports the CI gate as
-`INFRA_UNKNOWN` rather than a code verdict; making the repository public restores the free Actions
-tier for public repositories.
+(NO_DUPLICATES) and `frontier:check` (exit 0) — is green on this commit. GitHub Actions itself has
+never executed a step for this `main` (the account's Actions billing is stopped), so
+`bun run current-status` reports the CI gate as `INFRA_UNKNOWN` rather than a code verdict; a public
+repository returns to the free Actions tier, after which the two checks above are the first things
+that will run red.
 
 The movement patch is reversible: `rm -rf node_modules && bun install --frozen-lockfile
 --ignore-scripts` restores stock `mineflayer`.

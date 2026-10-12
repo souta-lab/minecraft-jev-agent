@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-09-23T04:01Z",
+  "asOf": "2026-10-12T00:00Z",
   "policy": {
     "wipLimit": 3,
     "unclassified": "backlog",
@@ -8,30 +8,17 @@
     "selectionRule": "Workers select only from NOW unless the orchestrator explicitly promotes a NEXT item. WAITING_LIVE, RESEARCH, FUTURE, REFERENCE_ONLY, unclassified BACKLOG, and every \"historical\" row are not normal coding work.",
     "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count.",
     "foldRule": "A consolidation fold is NOT a fix. Fold only after copying the slice's acceptance into a checklist row on the umbrella, close the slice as a tracking fold, and record it under \"historical\" with a note naming the umbrella. The umbrella row stays open until its own acceptance is verified live or explicitly dropped.",
-    "basis": "Reconciled 2026-09-23 against GitHub: exactly ten open issues, all umbrellas (#11 #308 #365 #366 #416 #421 #436 #437 #439 #440). Round 2 folded 30 slices into root causes (25 rows onto #366, 1 onto #11 (#449), 3 onto #439 (#451/#454/#455), 1 onto #436 (#456)); earlier rounds folded the authority/audit/M3-critical rows into #11/#421/#366/#436/#308. Routing therefore points only at the umbrellas, and every closed row this file used to present as work is recorded under \"historical\" with how it closed."
+    "basis": "Reconciled 2026-10-12 against GitHub: the repository has ZERO open issues (219 closed), so every routing category is empty and every row this file used to present as work is recorded under \"historical\" with the date it closed. The frontier is therefore empty by fact, not by omission: work selection falls back to the live Mission loop in AGENTS.md until an issue is opened or reopened. A closed row is never picked, and a closure recorded here is not a claim that its acceptance was verified."
   },
-  "now": [
-    421,
-    440,
-    11
-  ],
-  "next": [
-    437,
-    439,
-    436
-  ],
-  "waitingLive": [
-    366,
-    416
-  ],
-  "research": [
-    365,
-    308
-  ],
+  "now": [],
+  "next": [],
+  "waitingLive": [],
+  "research": [],
   "future": [],
   "referenceOnly": [],
   "historical": [
     3,
+    11,
     13,
     35,
     37,
@@ -50,8 +37,17 @@
     296,
     297,
     299,
+    308,
+    365,
+    366,
     401,
-    415
+    415,
+    416,
+    421,
+    436,
+    437,
+    439,
+    440
   ],
   "clusters": {
     "M3_EXECUTION": [
