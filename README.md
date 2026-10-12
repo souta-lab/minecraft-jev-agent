@@ -128,7 +128,7 @@ clone is not surprised, not to excuse them:
 | `packages/jev-agent/test-threat-response.mts` | 1 case: a completed Goal from a retired Option and the empty-queue horizon |
 | `packages/jev-agent/test-canopy-ground.mts` | 1 case: below-band canopy food-habitat refusal |
 | `packages/jev-agent/test-food-route.mts` | slow fixture; fails within the repository battery |
-| `bun run issue-state:check` | `#437`/`#439`/`#440` are closed on GitHub while their machine-readable `compliance` is `unknown`. The gate is right: a closed row must be verified-complete or recorded as a superseded fold, and neither is true. It is left red rather than written to `pass`, because that would be false evidence |
+| `bun run issue-state:check` | 9 rows in `ISSUE-STATE.json` describe a governance regime that the 2026-09-27 bulk closure ended: `#11`, `#308`, `#365`, `#366`, `#416`, `#421`, `#436` are closed while their machine-readable `compliance` is `unknown`, and `#401`/`#415` name absorbers (`#366`/`#11`) that are themselves closed. `#437`, `#439` and `#440` were reopened on 2026-10-12 because their own threads record unmet acceptance; the rest need the same decision and are left red rather than written to `pass`, because that would be false evidence |
 
 Everything else — the `bun-tests` repository battery (187/188), the M2 chain rehearsal
 (`tools/m2-chain-execution.mjs` drives 8/8 links, fixture 12/12), the buddy-driver package suite
@@ -249,6 +249,4 @@ logged.
 
 ## License
 
-No license has been selected for this repository yet, so it is **all rights reserved** by the
-copyright holder: you may read and evaluate the code, but no license is granted to use, modify or
-redistribute it. A license will be added explicitly if and when that changes.
+MIT — see [LICENSE](LICENSE).

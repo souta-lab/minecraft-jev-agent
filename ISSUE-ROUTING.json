@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-10-12T00:00Z",
+  "asOf": "2026-10-12T07:30Z",
   "policy": {
     "wipLimit": 3,
     "unclassified": "backlog",
@@ -8,10 +8,15 @@
     "selectionRule": "Workers select only from NOW unless the orchestrator explicitly promotes a NEXT item. WAITING_LIVE, RESEARCH, FUTURE, REFERENCE_ONLY, unclassified BACKLOG, and every \"historical\" row are not normal coding work.",
     "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count.",
     "foldRule": "A consolidation fold is NOT a fix. Fold only after copying the slice's acceptance into a checklist row on the umbrella, close the slice as a tracking fold, and record it under \"historical\" with a note naming the umbrella. The umbrella row stays open until its own acceptance is verified live or explicitly dropped.",
-    "basis": "Reconciled 2026-10-12 against GitHub: the repository has ZERO open issues (219 closed), so every routing category is empty and every row this file used to present as work is recorded under \"historical\" with the date it closed. The frontier is therefore empty by fact, not by omission: work selection falls back to the live Mission loop in AGENTS.md until an issue is opened or reopened. A closed row is never picked, and a closure recorded here is not a claim that its acceptance was verified."
+    "basis": "Reconciled 2026-10-12 against GitHub. The repository has 219 closed issues and THREE open ones: #437 and #439 (NEXT) and #440 (NOW), reopened because the 2026-09-27 bulk closure did not meet their acceptance and ISSUE-STATE.json recorded compliance=unknown for all three. Every other row this file used to present as work is closed and recorded under \"historical\" with the date it closed. A closure recorded here is not a claim that its acceptance was verified."
   },
-  "now": [],
-  "next": [],
+  "now": [
+    440
+  ],
+  "next": [
+    437,
+    439
+  ],
   "waitingLive": [],
   "research": [],
   "future": [],
@@ -44,10 +49,7 @@
     415,
     416,
     421,
-    436,
-    437,
-    439,
-    440
+    436
   ],
   "clusters": {
     "M3_EXECUTION": [
@@ -69,10 +71,10 @@
   },
   "notes": {
     "421": "NOW M3 critical path + WIP cap. Umbrella, not finished work: it carries the folded M3-critical rows (#13/#41/#56/#80 from round 1 plus the round-2 live-acceptance child), all still open. Audit measurement 2026-09-23T04:01Z (not re-measured by this file): resident run-mudkuea9-124kk from source 494a92b, body in the overworld at 26.5/79.0/-3.5, portal interior at 26/67/9, entry withheld reason=needs_descend (descend_plan:no_support@25,78,-2:air) — the descent capability (#440) is the live critical path ahead of ender_eye acceptance.",
-    "440": "NOW movement/scaffold umbrella, promoted from NEXT because the measured live blocker is the descent: portal entry is withheld reason=needs_descend while the landing support is air. Umbrella, not finished work: the bridge half is live-verified (BRIDGE_END placed=3 verified=true reason=reached) and the walk half landed as one harness-layer commitment (1 decision -> 7 mechanical legs -> verified arrival); descent/scaffold-down and the rest of the movement frontier are open rows.",
+    "440": "REOPENED 2026-10-12 during public-release preparation: it had been closed on 2026-09-27 in the bulk V4 migration sweep while ISSUE-STATE.json still recorded compliance=unknown and its own thread recorded unmet acceptance, which is why `bun run issue-state:check` failed. It is routed as NOW again; the reopen reason is recorded as a comment on the issue.",
     "11": "NOW architecture constitution (Grounded Option OS). Umbrella, not finished work: it carries the round-1 and round-2 absorbed rows (#107/#121/#128/#130/#296 authority map/config/taxonomy/status/docs, #415 human-intent authority, #449 config admission) and they are open checklist rows, not fixes.",
-    "437": "NEXT Jev state-hygiene umbrella, reopened 2026-09-22 from a current-main live audit because section 3 acceptance is still incomplete (sections 1-2 landed, markers observed in a real run). Open rows: semantic event compression, stable candidate identity, decision-epoch isolation. The 2026-09-22 closure is superseded history, not a fix.",
-    "439": "NEXT System2 typed-intent-harness umbrella, reopened 2026-09-22 after an exact-source audit ('skeleton landed; migration not started'). Carries the round-2 folded rows #451 (goto/goto_resource silently rewritten into collect), #454 (verify_portal lowering to a mutation-capable portal_lit) and #455 (Overworld fabrication while compileLiveDimension() is unused), all still open.",
+    "437": "REOPENED 2026-10-12 during public-release preparation: it had been closed on 2026-09-27 in the bulk V4 migration sweep while ISSUE-STATE.json still recorded compliance=unknown and its own thread recorded unmet acceptance, which is why `bun run issue-state:check` failed. It is routed as NEXT again; the reopen reason is recorded as a comment on the issue.",
+    "439": "REOPENED 2026-10-12 during public-release preparation: it had been closed on 2026-09-27 in the bulk V4 migration sweep while ISSUE-STATE.json still recorded compliance=unknown and its own thread recorded unmet acceptance, which is why `bun run issue-state:check` failed. It is routed as NEXT again; the reopen reason is recorded as a comment on the issue.",
     "436": "NEXT deterministic Skill-closure umbrella. Landed Phase 1 plus the combat half (exact-identity KILL, honest outcomes, never-actionless survival); open Phase 2/3 (HOLD_ITEM/GUI/PICKUP) and Phase 6 reflex classification. Carries the folded rows #297 (round 1, System2 failure algebra) and #456 (round 2, P0 HUNT_DROP truth: a kill with no drop returned done/verified=true).",
     "366": "WAITING_LIVE repo-wide audit umbrella (HOST lifecycle / snapshot / world identity / CI tooling). Umbrella, not finished work: it carries the 25 round-2 acceptance-inventory rows (24 slices plus the #394 addendum) and the HOST state-authority row #401. The 8 HOST P0 rows were CONSOLIDATED, not fixed — do not read the slice closures as fixes.",
     "416": "WAITING_LIVE behaviour quality gate (no recurrent wandering, redundant station crafting, purposeless actions, unbounded idle). Carries the absorbed #418 typed causal purpose; four behaviour families are pinned only by separate fixtures and no executable umbrella gate exists yet, so it is open implementation-plus-live work.",
