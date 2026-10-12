@@ -34,10 +34,29 @@ const executableMarkers = [
   `${runtime} --check`,
 ]
 
+/**
+ * Tracked documents that quote ANOTHER project's commands verbatim.
+ *
+ * `docs/history/investigations/minecraft-ai-frontier-report-2026-09-28.md` is a
+ * survey of an external repository and reproduces that project's own quick-start
+ * block: its package manager's install command and its runtime's CLI invocations.
+ * Those commands are not this repository's and translating them to Bun would
+ * falsify the quotation, so the file is exempt by name rather than by weakening
+ * the check for a whole directory. Nothing under `docs/history/` is executed.
+ *
+ * (This comment deliberately does not spell those tokens out - this file is
+ * itself scanned by the check it implements, which is why the token literals
+ * above are assembled from character arrays.)
+ */
+const QUOTED_EXTERNAL_COMMANDS = new Set([
+  'docs/history/investigations/minecraft-ai-frontier-report-2026-09-28.md',
+])
+
 const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' })
   .split('\0')
   .filter(Boolean)
   .filter((file) => !file.includes('/mineflayer-src'))
+  .filter((file) => !QUOTED_EXTERNAL_COMMANDS.has(file))
 
 const findings = []
 for (const file of files) {

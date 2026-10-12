@@ -103,12 +103,12 @@ export const PROJECTION_SCHEMAS: readonly ProjectionSchema[] = [
     // The #437 projection that is now on main. It is registered here so the
     // harness can carry it VERBATIM (`projectionModelView(buildJevSemanticProjection(...))`)
     // with a declared, closed field set, instead of a second parallel contract.
-    // The field list is drift-tested against jev-agent/src/jevSemanticProjection.ts.
+    // The field list is drift-tested against jev-agent/src/jev/semantic-projection.ts.
     projectionId: LANDED_437_PROJECTION_ID,
     version: LANDED_437_PROJECTION_VERSION,
-    owner: 'jev-agent/src/jevSemanticProjection.ts',
+    owner: 'jev-agent/src/jev/semantic-projection.ts',
     description:
-      '#437 jev-semantic-projection/v6 model view: banded/compacted semantic facts only, `counts` excluded as evidence.',
+      '#437 jev-semantic-projection/v11 model view: banded/compacted semantic facts only, `counts` excluded as evidence.',
     fields: LANDED_437_PROJECTION_MODEL_FIELDS,
   },
 ]
