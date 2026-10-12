@@ -31,8 +31,14 @@ const SELF: Vec3Json = { x: 0.5, y: 10, z: 0.5 }
 /** The cell the bot's feet occupy, and the support block directly below it. */
 const FEET: Vec3Json = { x: 0, y: 10, z: 0 }
 const SUPPORT: Vec3Json = { x: 0, y: 9, z: 0 }
-/** A legitimate stone beside the bot (same horizontal level) - must be preserved. */
-const BESIDE: Vec3Json = { x: 2, y: 10, z: 0 }
+/**
+ * A legitimate stone beside the bot (same horizontal level) - must be preserved.
+ * It sits one cell over rather than two because 60368f50 bounded collect MINEs to a
+ * 1.3-block horizontal pickup envelope: from SELF (0.5,10,0.5) a block centre at
+ * (2.5,10,0.5) is 2.0 away, so the drop would land outside the pickup volume and the
+ * MINE would be (correctly) withheld - which is a different assertion than this case.
+ */
+const BESIDE: Vec3Json = { x: 1, y: 10, z: 0 }
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {

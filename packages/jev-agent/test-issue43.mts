@@ -284,7 +284,10 @@ addCase('a visible log suppresses retrieval (normal mining keeps priority)', () 
     harvestTool: null,
   }
   const state = worldState({
-    position: { x: 0, y: 60, z: 0 },
+    // 60368f50 tightened the collect-MINE pickup envelope to 1.3 horizontal; from
+    // (0,60,0) this log's centre is 1.58 away, so the MINE this case is about would
+    // be withheld and the case would measure the approach route instead.
+    position: { x: 0.5, y: 60, z: 0.5 },
     goal: goal({}),
     goalQueue: queueWith(queuedGoal({})),
     signals: signals({ knownResources: [{ name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 40, y: 70, z: 40 } }] }),

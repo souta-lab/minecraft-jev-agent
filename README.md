@@ -114,6 +114,29 @@ cd packages/buddy-driver && bun test .        # host, generations, durable state
 cd packages/kernel     && bun test .          # kernel state machine, property + adversarial suites
 ```
 
+### Known failing checks (2026-10-12, `main` @ `33e11ca9`)
+
+These are pre-existing red on `main` and are being worked case by case. They are listed so a fresh
+clone is not surprised, not to excuse them:
+
+| Check | Observed |
+| --- | --- |
+| `tools/test-m2-chain-execution.mjs` | L1: the real candidate layer grounds no collect candidate for `raw_iron` (`presented=PLACE:crafting_table:p0_64_1,WAIT`), so the offline chain stops at link 1 |
+| `packages/jev-agent/test-craft-log-route.mts` | 3 cases: a prerequisite log route at 50,11,32 yields `MOVE:b50_11_32,WAIT` with no vertical/place route |
+| `packages/jev-agent/test-column-descent.mts` | 5 cases: own-column pillar descent / staircase-overhead plans |
+| `packages/jev-agent/test-acquisition-route.mts` | 2 cases: missing-material producer routing and the stone-only wood-tool cycle |
+| `packages/jev-agent/test-obsidian-route.mts` | 2 cases: obsidian MINE/DESCEND grounding |
+| `packages/jev-agent/test-threat-response.mts` | 1 case: a completed Goal from a retired Option and the empty-queue horizon |
+| `packages/jev-agent/test-canopy-ground.mts` | 1 case: below-band canopy food-habitat refusal |
+| `packages/jev-agent/test-food-route.mts` | slow fixture; fails within the repository battery |
+
+Everything else — the `bun-tests` repository battery (184/188), the buddy-driver package suite
+(82/82), `bun run typecheck`, `movement-patch:check`, `contract-docs-check` (5/5), `lane-guard`
+(NO_DUPLICATES) — is green on this commit. GitHub Actions itself has never executed a step for this
+`main` (the account's Actions billing is stopped), so `bun run current-status` reports the CI gate as
+`INFRA_UNKNOWN` rather than a code verdict; making the repository public restores the free Actions
+tier for public repositories.
+
 The movement patch is reversible: `rm -rf node_modules && bun install --frozen-lockfile
 --ignore-scripts` restores stock `mineflayer`.
 
