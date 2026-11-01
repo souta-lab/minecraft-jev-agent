@@ -1,10 +1,6 @@
 # minecraft-jev-agent
 
-> **PERMANENT ARCHITECTURE LOCK:** the canonical and permanent architecture is
-> **V4.1.2 Concurrent Verified Transition Runtime** (`AGENTS.md`,
-> `docs/architecture/NEW-ARCHITECTURE-V4.1.2.md`, validated checkpoint `092a5b38`).
-> It is never replaced, reopened, superseded, or redesigned in this repository —
-> there is no V4.1.3/V4.2/V5 and no successor architecture.
+
 
 An embodied Minecraft Java agent. A sparse **LLM planner** synthesizes *what* to do; a **Typed
 Decision Plane** (a System One / typed decision model — TypeSafe Jev or Liquid d1, selected by an
